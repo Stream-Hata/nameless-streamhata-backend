@@ -494,10 +494,23 @@ func voteIntent(text string) (yea, nei bool) {
 	}
 
 	switch token {
-	case "ya", "yea", "yes", "yay", "да", "за", "+", "+1", "✅", "✔":
+	case "ya", "yea", "yeah", "yes", "yay", "да", "за", "+", "+1", "✅", "✔":
 		return true, false
-	case "nei", "no", "nope", "нет", "против", "-", "-1", "❌", "✖":
+	case "nei", "ney", "no", "nope", "нет", "против", "-", "-1", "❌", "✖":
 		return false, true
+	}
+
+	return false, false
+}
+
+func emoteVoteIntent(emotes []twitch.ChatEmote) (yea, nei bool) {
+	for _, emote := range emotes {
+		switch strings.ToLower(strings.TrimSpace(emote.Name)) {
+		case "yea", "yeah", "yay", "ya":
+			return true, false
+		case "nei", "ney", "no", "nope":
+			return false, true
+		}
 	}
 
 	return false, false
@@ -522,6 +535,12 @@ func (s *Scheduler) processMessage(message twitch.TwitchChatMessage) {
 
 			return
 		}
+	}
+
+	if yea, nei := emoteVoteIntent(message.Emotes); yea != nei {
+		s.service.Vote(message.Author.ID, yea)
+
+		return
 	}
 
 	// Совместимость: голоса работают даже если триггеры ещё не перенастроены.
