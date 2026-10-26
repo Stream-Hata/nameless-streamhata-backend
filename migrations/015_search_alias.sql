@@ -1,0 +1,41 @@
+CREATE TABLE IF NOT EXISTS search_alias (
+	term text PRIMARY KEY,
+	replacement text NOT NULL,
+	updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO search_alias (term, replacement) VALUES
+('мортал','mortal'),
+('шел','shell'),
+('шелл','shell'),
+('мортал шел','mortal shell'),
+('мортал шелл','mortal shell'),
+('мортал шел 2','mortal shell 2'),
+('мортал шелл 2','mortal shell 2'),
+('ведьмак','witcher'),
+('ведьмак 3','witcher 3'),
+('скайрим','skyrim'),
+('морровинд','morrowind'),
+('обливион','oblivion'),
+('варкрафт','warcraft'),
+('старкрафт','starcraft'),
+('диабло','diablo'),
+('гта','gta'),
+('дум','doom'),
+('фоллаут','fallout'),
+('сталкер','stalker'),
+('майнкрафт','minecraft'),
+('террария','terraria'),
+('симс','sims'),
+('цивилизация','civilization'),
+('герои','heroes'),
+('казаки','cossacks'),
+('резидент','resident evil'),
+('хитман','hitman'),
+('ассасин','assassin'),
+('крид','creed'),
+('готик','gothic'),
+('ризен','risen'),
+('tes','elder scrolls'),
+('gta','grand theft auto')
+ON CONFLICT (term) DO NOTHING;

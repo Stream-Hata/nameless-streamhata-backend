@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-rgg}
+      POSTGRES_USER: ${DB_USER:-rgg}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change-me}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-rgg} -d ${DB_NAME:-rgg}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LISTEN_ADDR: 0.0.0.0:3000
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-rgg}
+      DB_USER: ${DB_USER:-rgg}
+      DB_PASSWORD: ${DB_PASSWORD:-change-me}
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  pgdata:

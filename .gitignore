@@ -1,0 +1,5 @@
+dumps/
+.env
+
+.env.simple
+.idea/

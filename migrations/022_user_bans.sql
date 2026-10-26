@@ -1,0 +1,4 @@
+ALTER TABLE users
+	ADD COLUMN IF NOT EXISTS banned boolean NOT NULL DEFAULT false,
+	ADD COLUMN IF NOT EXISTS ban_reason text NOT NULL DEFAULT '',
+	ADD COLUMN IF NOT EXISTS banned_at timestamptz;

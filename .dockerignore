@@ -1,0 +1,7 @@
+.git
+.env
+*.log
+nsh-backend
+nsh-backend-*
+data
+tmp
