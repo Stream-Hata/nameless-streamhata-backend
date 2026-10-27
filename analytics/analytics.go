@@ -39,10 +39,11 @@ type ViewerSource interface {
 }
 
 type Service struct {
-	mu      sync.Mutex
-	current *Session
-	history []Session
-	samples []Sample
+	mu       sync.Mutex
+	current  *Session
+	messages int
+	history  []Session
+	samples  []Sample
 
 	source ViewerSource
 	now    func() time.Time
@@ -87,6 +88,13 @@ func (s *Service) Status() string {
 	}
 
 	return fmt.Sprintf("в эфире, пик %d зрителей", s.current.PeakViewers)
+}
+
+func (s *Service) Messages() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.messages
 }
 
 func (s *Service) Current() *Session {
@@ -153,14 +161,11 @@ func (s *Service) HandleMessage() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.current == nil {
-		s.current = &Session{
-			ID:        fmt.Sprintf("session-%d", s.now().UnixNano()),
-			StartedAt: s.now().UTC(),
-		}
-	}
+	s.messages++
 
-	s.current.Messages++
+	if s.current != nil {
+		s.current.Messages++
+	}
 }
 
 // HandleChatters фиксирует число чатерсов из тика viewer-рантайма.
@@ -288,8 +293,9 @@ type Deps interface {
 func RegisterRoutes(srv Deps, service *Service) {
 	srv.ServeEndpoint("/rgg-sync/analytics", func(response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusOK, map[string]any{
-			"current": service.Current(),
-			"history": service.History(),
+			"current":  service.Current(),
+			"history":  service.History(),
+			"messages": service.Messages(),
 		})
 	})
 
