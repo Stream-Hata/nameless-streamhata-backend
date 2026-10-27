@@ -245,8 +245,12 @@ func main() {
 	quotesService.SetTriggers(triggersService)
 	quotes.RegisterRoutes(srv, quotesService)
 
+	commandsService.SetActioner(commandActioner{points: pointsService, games: gamesService, chat: chatRuntime})
+
 	redemptionsService := redemptions.New(pointsService, chatRuntime, musicDB)
 	redemptionsService.SetWheelEntry(gamesService.EnterWheelWithCost)
+	redemptionsService.SetRewards(chatRuntime)
+	redemptionsService.SetCommandRunner(commandsService)
 	redemptions.RegisterRoutes(srv, redemptionsService)
 
 	pollsService := polls.New(chatRuntime)
@@ -497,4 +501,24 @@ func registerDonations(srv server.Server, ctx context.Context, db *sql.DB) *dona
 	service.StartAll(ctx)
 
 	return service
+}
+
+type commandActioner struct {
+	points *points.Service
+	games  *games.Service
+	chat   *chatruntime.Runtime
+}
+
+func (a commandActioner) AwardPoints(userID, login, displayName string, amount int, reason string) error {
+	a.points.Add(userID, login, displayName, amount, reason)
+
+	return nil
+}
+
+func (a commandActioner) TimeoutUser(ctx context.Context, userID string, seconds int, reason string) error {
+	return a.chat.TimeoutUser(ctx, userID, seconds, reason)
+}
+
+func (a commandActioner) WheelEntry(userID, login, displayName, title string, bet int) error {
+	return a.games.EnterWheelWithCost(userID, login, displayName, title, false, bet)
 }

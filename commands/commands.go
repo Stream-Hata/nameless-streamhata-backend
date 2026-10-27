@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ type Command struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
 	Aliases         []string  `json:"aliases"`
+	Action          string    `json:"action"`
 	Response        string    `json:"response"`
 	CooldownSeconds int       `json:"cooldownSeconds"`
 	UserLevel       string    `json:"userLevel"`
@@ -39,14 +41,28 @@ var levels = map[string]int{
 }
 
 // Service хранит команды, кулдауны и обрабатывает сообщения чата.
+type Actioner interface {
+	AwardPoints(userID, login, displayName string, amount int, reason string) error
+	TimeoutUser(ctx context.Context, userID string, seconds int, reason string) error
+	WheelEntry(userID, login, displayName, title string, bet int) error
+}
+
 type Service struct {
 	mu        sync.Mutex
 	commands  map[string]*Command
 	cooldowns map[string]time.Time
 
-	writer chat.Writer
-	db     *sql.DB
-	now    func() time.Time
+	writer   chat.Writer
+	actioner Actioner
+	db       *sql.DB
+	now      func() time.Time
+}
+
+func (s *Service) SetActioner(actioner Actioner) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.actioner = actioner
 }
 
 func New(writer chat.Writer, db *sql.DB) *Service {
@@ -109,6 +125,14 @@ func (s *Service) List() []Command {
 
 func (s *Service) Upsert(command Command) (Command, error) {
 	command.Name = normalizeName(command.Name)
+
+	if command.Action == "" {
+		command.Action = "say"
+	}
+
+	if command.Action != "say" && command.Action != "points" && command.Action != "timeout" && command.Action != "wheel" {
+		return Command{}, fmt.Errorf("неизвестное действие команды")
+	}
 
 	if command.Name == "" {
 		return Command{}, fmt.Errorf("команда должна иметь имя")
@@ -220,6 +244,63 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 	s.mu.Unlock()
 
 	s.persist(*command)
+	s.execute(*command, message, response)
+}
+
+func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
+	s.mu.Lock()
+
+	for _, command := range s.commands {
+		if command.ID != id || !command.Enabled {
+			continue
+		}
+
+		snapshot := *command
+		response := render(snapshot.Response, message, snapshot.Counter+1)
+		s.mu.Unlock()
+		s.execute(snapshot, message, response)
+
+		return true
+	}
+
+	s.mu.Unlock()
+
+	return false
+}
+
+func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string) {
+	if s.actioner != nil {
+		switch command.Action {
+		case "points":
+			if amount, err := strconv.Atoi(strings.TrimSpace(command.Response)); err == nil {
+				name := message.Author.DisplayName
+				if name == "" {
+					name = message.Author.Login
+				}
+				_ = s.actioner.AwardPoints(message.Author.ID, message.Author.Login, name, amount, "command: "+command.Name)
+			}
+
+			return
+		case "timeout":
+			if seconds, err := strconv.Atoi(strings.TrimSpace(command.Response)); err == nil {
+				_ = s.actioner.TimeoutUser(context.Background(), message.Author.ID, seconds, "command: "+command.Name)
+			}
+
+			return
+		case "wheel":
+			title := strings.TrimSpace(command.Response)
+			if title == "" {
+				title = command.Name
+			}
+			name := message.Author.DisplayName
+			if name == "" {
+				name = message.Author.Login
+			}
+			_ = s.actioner.WheelEntry(message.Author.ID, message.Author.Login, name, title, 0)
+
+			return
+		}
+	}
 
 	if s.writer != nil {
 		if err := s.writer.Say(response); err != nil {
@@ -309,11 +390,12 @@ func (s *Service) persist(command Command) {
 	}
 
 	query := `
-		INSERT INTO command (id, name, aliases, response, cooldown_seconds, user_level, enabled, counter, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO command (id, name, aliases, action, response, cooldown_seconds, user_level, enabled, counter, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			aliases = EXCLUDED.aliases,
+			action = EXCLUDED.action,
 			response = EXCLUDED.response,
 			cooldown_seconds = EXCLUDED.cooldown_seconds,
 			user_level = EXCLUDED.user_level,
@@ -325,6 +407,7 @@ func (s *Service) persist(command Command) {
 		command.ID,
 		command.Name,
 		string(aliases),
+		command.Action,
 		command.Response,
 		command.CooldownSeconds,
 		command.UserLevel,
@@ -343,7 +426,7 @@ func (s *Service) load() {
 	}
 
 	rows, err := s.db.QueryContext(context.Background(),
-		`SELECT id, name, aliases, response, cooldown_seconds, user_level, enabled, counter, created_at FROM command`)
+		`SELECT id, name, aliases, action, response, cooldown_seconds, user_level, enabled, counter, created_at FROM command`)
 	if err != nil {
 		log.Printf("[Commands] load failed: %v", err)
 
@@ -364,6 +447,7 @@ func (s *Service) load() {
 			&command.ID,
 			&command.Name,
 			&aliases,
+			&command.Action,
 			&command.Response,
 			&command.CooldownSeconds,
 			&command.UserLevel,

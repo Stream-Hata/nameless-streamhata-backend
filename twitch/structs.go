@@ -134,3 +134,11 @@ type TwitchChatMessage struct {
 	Emotes []ChatEmote `json:"emotes,omitempty"`
 	Badges []ChatBadge `json:"badges,omitempty"`
 }
+
+type ChannelReward struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Prompt  string `json:"prompt"`
+	Cost    int    `json:"cost"`
+	Enabled bool   `json:"is_enabled"`
+}

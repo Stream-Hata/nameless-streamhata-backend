@@ -8,6 +8,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/netcfg"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,6 +24,24 @@ func ExtractVideoID(text string) (string, bool) {
 	match := linkPattern.FindStringSubmatch(text)
 
 	if len(match) < 2 {
+		return "", false
+	}
+
+	parsed, err := url.Parse("https://" + match[0])
+	if err != nil {
+		return "", false
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+	allowed := map[string]bool{
+		"youtube.com":       true,
+		"www.youtube.com":   true,
+		"m.youtube.com":     true,
+		"music.youtube.com": true,
+		"youtu.be":          true,
+	}
+
+	if !allowed[host] {
 		return "", false
 	}
 

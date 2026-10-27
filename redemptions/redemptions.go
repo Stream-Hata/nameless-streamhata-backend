@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/p7x-dev/nameless-streamhata-backend/points"
+	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 )
 
 // Mapping — привязка названия награды к действию.
@@ -44,15 +45,28 @@ type Actioner interface {
 	FulfillRedemption(ctx context.Context, rewardID, redemptionID string) error
 }
 
+type CommandRunner interface {
+	Run(id string, message twitch.TwitchChatMessage) bool
+}
+
+type RewardManager interface {
+	ListChannelRewards(ctx context.Context) ([]twitch.ChannelReward, error)
+	CreateChannelReward(ctx context.Context, title, prompt string, cost int, enabled bool) (twitch.ChannelReward, error)
+	UpdateChannelReward(ctx context.Context, id, title, prompt string, cost int, enabled bool) (twitch.ChannelReward, error)
+	DeleteChannelReward(ctx context.Context, id string) error
+}
+
 type Service struct {
 	mu       sync.Mutex
 	mappings map[string]*Mapping
 	records  []Record
 
-	points  *points.Service
-	actions Actioner
-	db      *sql.DB
-	now     func() time.Time
+	points   *points.Service
+	actions  Actioner
+	rewards  RewardManager
+	commands CommandRunner
+	db       *sql.DB
+	now      func() time.Time
 
 	wheelEntry func(userID, login, displayName, title string, luck bool, bet int) error
 }
@@ -124,7 +138,7 @@ func (s *Service) Upsert(mapping Mapping) (Mapping, error) {
 	}
 
 	switch mapping.Action {
-	case "say", "points", "timeout", "wheel":
+	case "say", "points", "timeout", "wheel", "command":
 	default:
 		return Mapping{}, fmt.Errorf("действие должно быть say, points, timeout или wheel")
 	}
@@ -193,6 +207,20 @@ type redemptionEvent struct {
 		Cost  int    `json:"cost"`
 	} `json:"reward"`
 	UserInput string `json:"user_input"`
+}
+
+func (s *Service) SetCommandRunner(commands CommandRunner) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.commands = commands
+}
+
+func (s *Service) SetRewards(rewards RewardManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.rewards = rewards
 }
 
 func (s *Service) SetWheelEntry(entry func(userID, login, displayName, title string, luck bool, bet int) error) {
@@ -292,6 +320,17 @@ func (s *Service) execute(ctx context.Context, mapping Mapping, event redemption
 		if err == nil && s.actions != nil {
 			if err := s.actions.TimeoutUser(ctx, userID, seconds, "channel points: "+event.Reward.Title); err != nil {
 				log.Printf("[Redemptions] timeout failed: %v", err)
+				fulfilled = false
+			}
+		}
+	case "command":
+		if s.commands != nil {
+			message := twitch.TwitchChatMessage{
+				Author: twitch.ChatUser{ID: userID, Login: login, DisplayName: name},
+				Text:   mapping.Payload,
+				SentAt: event.Status,
+			}
+			if !s.commands.Run(mapping.Payload, message) {
 				fulfilled = false
 			}
 		}
@@ -396,6 +435,124 @@ type Deps interface {
 }
 
 func RegisterRoutes(srv Deps, service *Service) {
+	type rewardBody struct {
+		ID      string `json:"id"`
+		Title   string `json:"title"`
+		Prompt  string `json:"prompt"`
+		Cost    int    `json:"cost"`
+		Enabled bool   `json:"enabled"`
+		Action  string `json:"action"`
+		Payload string `json:"payload"`
+	}
+
+	srv.ServeEndpoint("/rgg-sync/twitch-rewards", func(response http.ResponseWriter, request *http.Request) {
+		if service.rewards == nil {
+			http.Error(response, "twitch is not connected", http.StatusServiceUnavailable)
+
+			return
+		}
+
+		switch request.Method {
+		case http.MethodGet:
+			rewards, err := service.rewards.ListChannelRewards(request.Context())
+			if err != nil {
+				writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
+
+				return
+			}
+
+			writeJSON(response, http.StatusOK, map[string]any{"rewards": rewards, "mappings": service.Mappings()})
+
+			return
+		case http.MethodPost:
+			var body rewardBody
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+
+				return
+			}
+
+			if strings.TrimSpace(body.Title) == "" || body.Cost < 1 {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "title and cost are required"})
+
+				return
+			}
+
+			action := body.Action
+			if action == "" {
+				action = "say"
+			}
+
+			reward, err := service.rewards.CreateChannelReward(request.Context(), body.Title, body.Prompt, body.Cost, body.Enabled)
+			if err != nil {
+				writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
+
+				return
+			}
+
+			mapping, err := service.Upsert(Mapping{ID: reward.ID, RewardTitle: reward.Title, Action: action, Payload: body.Payload, Enabled: true})
+			if err != nil {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": err.Error()})
+
+				return
+			}
+
+			writeJSON(response, http.StatusOK, map[string]any{"reward": reward, "mapping": mapping})
+
+			return
+		case http.MethodPatch:
+			var body rewardBody
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body.ID == "" {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+
+				return
+			}
+
+			reward, err := service.rewards.UpdateChannelReward(request.Context(), body.ID, body.Title, body.Prompt, body.Cost, body.Enabled)
+			if err != nil {
+				writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
+
+				return
+			}
+
+			action := body.Action
+			if action == "" {
+				action = "say"
+			}
+
+			mapping, err := service.Upsert(Mapping{ID: reward.ID, RewardTitle: reward.Title, Action: action, Payload: body.Payload, Enabled: true})
+			if err != nil {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": err.Error()})
+
+				return
+			}
+
+			writeJSON(response, http.StatusOK, map[string]any{"reward": reward, "mapping": mapping})
+
+			return
+		default:
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	srv.ServeEndpoint("/rgg-sync/twitch-rewards/{id}", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodDelete || service.rewards == nil {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		id := request.PathValue("id")
+		if err := service.rewards.DeleteChannelReward(request.Context(), id); err != nil {
+			writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
+
+			return
+		}
+
+		service.Delete(id)
+		response.WriteHeader(http.StatusNoContent)
+	})
+
 	srv.ServeEndpoint("/rgg-sync/redemptions", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, map[string]any{

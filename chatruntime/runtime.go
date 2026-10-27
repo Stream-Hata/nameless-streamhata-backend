@@ -539,6 +539,116 @@ func urlQueryEscape(value string) string {
 	return url.QueryEscape(value)
 }
 
+// ListChannelRewards возвращает управляемые награды канала.
+func (r *Runtime) ListChannelRewards(ctx context.Context) ([]twitch.ChannelReward, error) {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint := fmt.Sprintf(
+		"https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=%s&only_manageable_rewards=true",
+		broadcasterID,
+	)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	var payload struct {
+		Data []twitch.ChannelReward `json:"data"`
+	}
+	if err := r.doJSON(request, &payload); err != nil {
+		return nil, err
+	}
+
+	return payload.Data, nil
+}
+
+// CreateChannelReward создаёт награду channel points.
+func (r *Runtime) CreateChannelReward(ctx context.Context, title, prompt string, cost int, enabled bool) (twitch.ChannelReward, error) {
+	return r.channelReward(ctx, http.MethodPost, "", map[string]any{
+		"title": title, "prompt": prompt, "cost": cost, "is_enabled": enabled,
+	})
+}
+
+// UpdateChannelReward обновляет награду channel points.
+func (r *Runtime) UpdateChannelReward(ctx context.Context, id, title, prompt string, cost int, enabled bool) (twitch.ChannelReward, error) {
+	return r.channelReward(ctx, http.MethodPatch, id, map[string]any{
+		"title": title, "prompt": prompt, "cost": cost, "is_enabled": enabled,
+	})
+}
+
+func (r *Runtime) channelReward(ctx context.Context, method, id string, body map[string]any) (twitch.ChannelReward, error) {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return twitch.ChannelReward{}, err
+	}
+
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=%s", broadcasterID)
+	if id != "" {
+		endpoint += "&id=" + urlQueryEscape(id)
+	}
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return twitch.ChannelReward{}, err
+	}
+
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, strings.NewReader(string(raw)))
+	if err != nil {
+		return twitch.ChannelReward{}, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+	request.Header.Set("Content-Type", "application/json")
+
+	var payload struct {
+		Data []twitch.ChannelReward `json:"data"`
+	}
+	if err := r.doJSON(request, &payload); err != nil {
+		return twitch.ChannelReward{}, err
+	}
+	if len(payload.Data) == 0 {
+		return twitch.ChannelReward{}, errors.New("rewards: empty response")
+	}
+
+	return payload.Data[0], nil
+}
+
+// DeleteChannelReward удаляет награду channel points.
+func (r *Runtime) DeleteChannelReward(ctx context.Context, id string) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf(
+		"https://api.twitch.tv/helix/channel_points/custom_rewards?broadcaster_id=%s&id=%s",
+		broadcasterID, urlQueryEscape(id),
+	)
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("rewards delete returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
 // FulfillRedemption помечает выкуп channel points выполненным.
 func (r *Runtime) FulfillRedemption(ctx context.Context, rewardID, redemptionID string) error {
 	r.mu.Lock()
