@@ -136,6 +136,25 @@ func (s *Service) Upsert(command Command) (Command, error) {
 	return command, nil
 }
 
+func (s *Service) SetCommandEnabled(id string, enabled bool) (Command, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, command := range s.commands {
+		if command.ID != id {
+			continue
+		}
+
+		command.Enabled = enabled
+		snapshot := *command
+		s.persist(snapshot)
+
+		return snapshot, true
+	}
+
+	return Command{}, false
+}
+
 func (s *Service) Delete(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -411,6 +430,29 @@ func RegisterRoutes(srv Deps, service *Service) {
 	})
 
 	srv.ServeEndpoint("/rgg-sync/commands/{id}", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPatch {
+			var body struct {
+				Enabled bool `json:"enabled"`
+			}
+
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+
+				return
+			}
+
+			command, ok := service.SetCommandEnabled(request.PathValue("id"), body.Enabled)
+			if !ok {
+				writeJSON(response, http.StatusNotFound, map[string]string{"error": "command not found"})
+
+				return
+			}
+
+			writeJSON(response, http.StatusOK, command)
+
+			return
+		}
+
 		if request.Method != http.MethodDelete {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
