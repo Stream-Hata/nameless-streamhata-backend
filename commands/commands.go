@@ -439,12 +439,11 @@ func (s *Service) persist(command Command) {
 	}
 
 	query := `
-		INSERT INTO command (id, name, aliases, action, response, cooldown_seconds, user_level, enabled, counter, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO command (id, name, aliases, response, cooldown_seconds, user_level, enabled, counter, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			aliases = EXCLUDED.aliases,
-			action = EXCLUDED.action,
 			response = EXCLUDED.response,
 			cooldown_seconds = EXCLUDED.cooldown_seconds,
 			user_level = EXCLUDED.user_level,
@@ -456,7 +455,6 @@ func (s *Service) persist(command Command) {
 		command.ID,
 		command.Name,
 		string(aliases),
-		command.Action,
 		command.Response,
 		command.CooldownSeconds,
 		command.UserLevel,
@@ -475,7 +473,7 @@ func (s *Service) load() {
 	}
 
 	rows, err := s.db.QueryContext(context.Background(),
-		`SELECT id, name, aliases, action, response, cooldown_seconds, user_level, enabled, counter, created_at FROM command`)
+		`SELECT id, name, aliases, response, cooldown_seconds, user_level, enabled, counter, created_at FROM command`)
 	if err != nil {
 		log.Printf("[Commands] load failed: %v", err)
 
@@ -496,7 +494,6 @@ func (s *Service) load() {
 			&command.ID,
 			&command.Name,
 			&aliases,
-			&command.Action,
 			&command.Response,
 			&command.CooldownSeconds,
 			&command.UserLevel,
@@ -508,6 +505,7 @@ func (s *Service) load() {
 		}
 
 		_ = json.Unmarshal([]byte(aliases), &command.Aliases)
+		command.Action = "say"
 		s.commands[command.Name] = &command
 	}
 }

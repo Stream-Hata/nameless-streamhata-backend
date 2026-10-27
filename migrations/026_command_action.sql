@@ -1,2 +1,0 @@
-ALTER TABLE command
-	ADD COLUMN IF NOT EXISTS action varchar(30) NOT NULL DEFAULT 'say';
