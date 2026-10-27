@@ -32,8 +32,8 @@ func defaults() []Trigger {
 		{Action: "games.duel", Command: "!duel", Aliases: []string{"!дуэль"}, Enabled: true, Description: "Дуэль: вызов"},
 		{Action: "games.accept", Command: "!accept", Aliases: []string{"!принять"}, Enabled: true, Description: "Дуэль: принять"},
 		{Action: "quotes.quote", Command: "!quote", Aliases: nil, Enabled: true, Description: "Цитаты"},
-		{Action: "jury.yea", Command: "!yea", Aliases: []string{"!ya", "!за"}, Enabled: true, Description: "Голос жюри: за"},
-		{Action: "jury.nei", Command: "!nei", Aliases: []string{"!no", "!нет", "!против"}, Enabled: true, Description: "Голос жюри: против"},
+		{Action: "jury.yea", Command: "!yea", Aliases: []string{"!ya"}, Enabled: true, Description: "Голос жюри: за"},
+		{Action: "jury.nei", Command: "!nei", Aliases: []string{"!no"}, Enabled: true, Description: "Голос жюри: против"},
 		{Action: "clips.clip", Command: "!clip", Aliases: nil, Enabled: true, Description: "Создать клип"},
 	}
 }

@@ -105,7 +105,7 @@ const (
 	statusVoting   = "voting"
 	statusFinished = "finished"
 
-	defaultDurationSeconds = 30
+	defaultDurationSeconds = 60
 	defaultMinConfidence   = 0.8
 )
 
@@ -502,9 +502,9 @@ func voteIntent(text string) (yea, nei bool) {
 	}
 
 	switch token {
-	case "ya", "yea", "yeah", "yes", "yay", "да", "за", "+", "+1", "✅", "✔":
+	case "ya", "yea", "yeah", "yes", "yay", "+", "+1", "✅", "✔":
 		return true, false
-	case "nei", "ney", "no", "nope", "нет", "против", "-", "-1", "❌", "✖":
+	case "nei", "ney", "no", "nope", "-", "-1", "❌", "✖":
 		return false, true
 	}
 
