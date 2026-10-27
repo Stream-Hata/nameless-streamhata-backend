@@ -184,10 +184,12 @@ func (s *Service) Upsert(command Command) (Command, error) {
 	s.mu.Lock()
 	s.commands[command.Name] = &command
 	s.actions[command.ID] = command.Action
+	s.replies[command.ID] = command.Reply
 	s.mu.Unlock()
 
 	s.persist(command)
 	s.persistActions()
+	s.persistReplies()
 
 	return command, nil
 }
