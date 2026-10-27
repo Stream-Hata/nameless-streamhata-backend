@@ -214,6 +214,19 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 	s.reply(fmt.Sprintf("#%d: «%s» — %s", quote.Number, quote.Text, quote.Author))
 }
 
+func (s *Service) RandomText() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.quotes) == 0 {
+		return "Цитат пока нет."
+	}
+
+	quote := s.quotes[s.randN(len(s.quotes))]
+
+	return fmt.Sprintf("#%d: «%s» — %s", quote.Number, quote.Text, quote.Author)
+}
+
 func (s *Service) reply(text string) {
 	if s.writer == nil || text == "" {
 		return

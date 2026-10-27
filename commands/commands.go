@@ -429,7 +429,7 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 
 			return
 		default:
-			if strings.HasPrefix(command.Action, "twitch.") {
+			if strings.HasPrefix(command.Action, "twitch.") || strings.HasPrefix(command.Action, "points.") || command.Action == "quotes.random" {
 				text := s.actioner.Twitch(context.Background(), command.Action, message.Author.ID)
 				if text != "" && s.writer != nil {
 					_ = s.writer.Say(text)

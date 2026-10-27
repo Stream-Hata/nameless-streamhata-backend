@@ -542,6 +542,18 @@ func (s *Service) handleAction(message twitch.TwitchChatMessage, action string, 
 	}
 }
 
+func (s *Service) BalanceText(message twitch.TwitchChatMessage) string {
+	return s.balanceText(message)
+}
+
+func (s *Service) TopText() string {
+	return s.topText()
+}
+
+func (s *Service) ShopText() string {
+	return s.shopText()
+}
+
 func (s *Service) balanceText(message twitch.TwitchChatMessage) string {
 	wallet, ok := s.Wallet(message.Author.ID)
 

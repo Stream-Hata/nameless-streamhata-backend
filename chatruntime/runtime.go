@@ -295,6 +295,72 @@ func (r *Runtime) CreateClip(ctx context.Context) (string, error) {
 	return payload.Data[0].EditURL, nil
 }
 
+// FollowersCount возвращает число фолловеров.
+func (r *Runtime) FollowersCount(ctx context.Context) (int, error) {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return 0, err
+	}
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/channels/followers?broadcaster_id=%s", broadcasterID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+	var payload struct {
+		Total int `json:"total"`
+	}
+	if err := r.doJSON(request, &payload); err != nil {
+		return 0, err
+	}
+	return payload.Total, nil
+}
+
+// SubscribersCount возвращает число подписчиков.
+func (r *Runtime) SubscribersCount(ctx context.Context) (int, error) {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return 0, err
+	}
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/subscriptions?broadcaster_id=%s", broadcasterID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+	var payload struct {
+		Total int `json:"total"`
+	}
+	if err := r.doJSON(request, &payload); err != nil {
+		return 0, err
+	}
+	return payload.Total, nil
+}
+
+// ChattersCount возвращает число зрителей в чате.
+func (r *Runtime) ChattersCount(ctx context.Context) (int, error) {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return 0, err
+	}
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/chat/chatters?broadcaster_id=%s&moderator_id=%s", broadcasterID, broadcasterID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+	var payload struct {
+		Total int `json:"total"`
+	}
+	if err := r.doJSON(request, &payload); err != nil {
+		return 0, err
+	}
+	return payload.Total, nil
+}
+
 // FollowerSince возвращает дату подписки пользователя на канал.
 func (r *Runtime) FollowerSince(ctx context.Context, userID string) (string, error) {
 	token, broadcasterID, err := r.credentials()

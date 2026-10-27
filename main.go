@@ -242,7 +242,7 @@ func main() {
 	quotesService.SetTriggers(triggersService)
 	quotes.RegisterRoutes(srv, quotesService)
 
-	commandsService.SetActioner(commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService})
+	commandsService.SetActioner(commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService, quotes: quotesService})
 	commandsService.SetVariableResolver(func(name string) string {
 		switch name {
 		case "lastmusic", "lasttrack", "np", "now":
@@ -572,6 +572,7 @@ type commandActioner struct {
 	games  *games.Service
 	chat   *chatruntime.Runtime
 	music  *music.Service
+	quotes *quotes.Service
 }
 
 func (a commandActioner) AwardPoints(userID, login, displayName string, amount int, reason string) error {
@@ -626,6 +627,29 @@ func (a commandActioner) Twitch(ctx context.Context, action, userID string) stri
 		if err == nil {
 			return fmt.Sprintf("Зрителей: %d", value)
 		}
+	case "twitch.followers":
+		value, err := a.chat.FollowersCount(ctx)
+		if err == nil {
+			return fmt.Sprintf("Фолловеров: %d", value)
+		}
+	case "twitch.subscribers":
+		value, err := a.chat.SubscribersCount(ctx)
+		if err == nil {
+			return fmt.Sprintf("Подписчиков: %d", value)
+		}
+	case "twitch.chatters":
+		value, err := a.chat.ChattersCount(ctx)
+		if err == nil {
+			return fmt.Sprintf("В чате: %d", value)
+		}
+	case "points.balance":
+		return a.points.BalanceText(twitch.TwitchChatMessage{Author: twitch.ChatUser{ID: userID, Login: userID, DisplayName: userID}})
+	case "points.top":
+		return a.points.TopText()
+	case "points.shop":
+		return a.points.ShopText()
+	case "quotes.random":
+		return a.quotes.RandomText()
 	case "twitch.title", "twitch.game":
 		title, game, _, err := a.chat.GetChannelInfo(ctx)
 		if err == nil {
