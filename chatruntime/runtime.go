@@ -60,6 +60,7 @@ type Runtime struct {
 	activeToken    string
 	broadcaster    twitch.ChatUser
 	onConnected    func(twitch.ChatUser)
+	sent           map[string]time.Time
 	onNotification func(subscriptionType string, raw json.RawMessage)
 
 	http *http.Client
@@ -91,7 +92,15 @@ func New(
 		http:         netcfg.NewHTTPClient(20 * time.Second),
 		enabled:      true,
 		status:       "ожидает запуска",
+		sent:         make(map[string]time.Time),
 	}
+}
+
+// Reconnect перезапускает IRC/EventSub с актуальным токеном из БД.
+func (r *Runtime) Reconnect(ctx context.Context) error {
+	r.stopClients()
+
+	return r.connect(ctx)
 }
 
 // SetOnConnected — колбэк после успешного подключения (канал известен).
@@ -111,8 +120,31 @@ func (r *Runtime) SetNotificationRouter(router func(subscriptionType string, raw
 	r.onNotification = router
 }
 
+// IsOwnText проверяет, что сообщение недавно отправлено самим приложением.
+func (r *Runtime) IsOwnText(text string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	at, ok := r.sent[text]
+	if !ok {
+		return false
+	}
+
+	if time.Since(at) > 20*time.Second {
+		delete(r.sent, text)
+
+		return false
+	}
+
+	return true
+}
+
 // Say отправляет сообщение через Twitch Helix, с fallback на IRC.
 func (r *Runtime) Say(text string) error {
+	r.mu.Lock()
+	r.sent[text] = time.Now()
+	r.mu.Unlock()
+
 	if err := r.sayAPI(text); err == nil {
 		return nil
 	}

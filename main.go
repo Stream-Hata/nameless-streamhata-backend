@@ -245,7 +245,7 @@ func main() {
 	commandsService.SetActioner(commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService})
 	commandsService.SetVariableResolver(func(name string) string {
 		switch name {
-		case "lastmusic", "lasttrack", "np":
+		case "lastmusic", "lasttrack", "np", "now":
 			track := musicService.Current()
 			if track == nil {
 				if tracks := musicService.List(); len(tracks) > 0 {
@@ -387,6 +387,10 @@ func main() {
 
 	// Конвейер чата: активность таймеров, команды, модерация, баллы, игры.
 	chatService.Subscribe(func(message twitch.TwitchChatMessage) {
+		if chatRuntime.IsOwnText(message.Text) {
+			return
+		}
+
 		timersService.NoteChatActivity()
 
 		if action, _, ok := triggersService.Match(message.Text); ok && action == "music.add" {
@@ -407,7 +411,7 @@ func main() {
 		}
 
 		switch strings.ToLower(strings.TrimSpace(message.Text)) {
-		case "!np", "!nowplaying", "!сейчас":
+		case "!np", "!now", "!nowplaying", "!сейчас":
 			go func() {
 				track := musicService.Current()
 				if track == nil {
@@ -441,6 +445,23 @@ func main() {
 		go pointsService.HandleMessage(message)
 		go gamesService.HandleMessage(message)
 		go quotesService.HandleMessage(message)
+	})
+
+	srv.ServeEndpoint("/rgg-sync/twitch/reconnect", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		if err := chatRuntime.Reconnect(request.Context()); err != nil {
+			http.Error(response, err.Error(), http.StatusBadGateway)
+
+			return
+		}
+
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = response.Write([]byte(`{"ok":true}`))
 	})
 
 	srv.ServeEndpoint("/rgg-sync/chat/badges", func(response http.ResponseWriter, request *http.Request) {
