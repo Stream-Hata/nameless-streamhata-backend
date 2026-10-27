@@ -546,6 +546,12 @@ func (s *Scheduler) processMessage(message twitch.TwitchChatMessage) {
 			}
 		}
 
+		if yea, nei := voteIntent(text); yea != nei {
+			s.service.Vote(message.Author.ID, yea)
+
+			return
+		}
+
 		return
 	}
 
