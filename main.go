@@ -420,7 +420,7 @@ func main() {
 					return
 				}
 
-				_ = chatRuntime.Say(fmt.Sprintf("Сейчас играет: %s — %s", track.Title, track.URL))
+				_ = chatRuntime.Say("Сейчас играет: " + track.URL)
 			}()
 
 			return
