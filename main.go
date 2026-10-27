@@ -372,6 +372,22 @@ func main() {
 	chatService.Subscribe(func(message twitch.TwitchChatMessage) {
 		timersService.NoteChatActivity()
 
+		switch strings.ToLower(strings.TrimSpace(message.Text)) {
+		case "!np", "!nowplaying", "!сейчас":
+			go func() {
+				track := musicService.Current()
+				if track == nil {
+					_ = chatRuntime.Say("Сейчас ничего не играет")
+
+					return
+				}
+
+				_ = chatRuntime.Say(fmt.Sprintf("Сейчас играет: %s — %s", track.Title, track.URL))
+			}()
+
+			return
+		}
+
 		go commandsService.HandleMessage(message)
 		go moderationService.HandleMessage(ctx, message)
 

@@ -56,6 +56,7 @@ type Stats struct {
 type Service struct {
 	mu      sync.RWMutex
 	tracks  map[string]*Track
+	current string
 	enabled bool
 
 	db       *sql.DB
@@ -132,6 +133,41 @@ func (s *Service) HandleChatMessage(ctx context.Context, message twitch.TwitchCh
 	if _, err := s.Add(ctx, videoID, "https://www.youtube.com/watch?v="+videoID, addedBy); err != nil {
 		log.Printf("[Music] failed to add %s: %v", videoID, err)
 	}
+}
+
+// SetCurrent запоминает трек, который сейчас играет в оверлее.
+func (s *Service) SetCurrent(videoID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if videoID == "" {
+		s.current = ""
+
+		return
+	}
+
+	if _, ok := s.tracks[videoID]; ok {
+		s.current = videoID
+	}
+}
+
+// Current возвращает текущий трек, если он ещё есть в списке.
+func (s *Service) Current() *Track {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.current == "" {
+		return nil
+	}
+
+	track, ok := s.tracks[s.current]
+	if !ok {
+		return nil
+	}
+
+	snapshot := *track
+
+	return &snapshot
 }
 
 // Add получает метаданные трека и сохраняет его в список (upsert по videoId).

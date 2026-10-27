@@ -80,6 +80,33 @@ func RegisterRoutes(srv Deps, service *Service) {
 		response.WriteHeader(http.StatusNoContent)
 	})
 
+	srv.ServeEndpoint("/rgg-sync/music/current", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			writeJSON(response, http.StatusOK, map[string]any{"track": service.Current()})
+
+			return
+		}
+
+		if request.Method != http.MethodPost {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		var body struct {
+			VideoID string `json:"videoId"`
+		}
+
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+
+			return
+		}
+
+		service.SetCurrent(strings.TrimSpace(body.VideoID))
+		writeJSON(response, http.StatusOK, map[string]any{"ok": true})
+	})
+
 	srv.ServeEndpoint("/rgg-sync/music/thumbnail", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
