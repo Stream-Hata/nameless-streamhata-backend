@@ -111,8 +111,12 @@ func (r *Runtime) SetNotificationRouter(router func(subscriptionType string, raw
 	r.onNotification = router
 }
 
-// Say отправляет сообщение в чат от имени канала.
+// Say отправляет сообщение через Twitch Helix, с fallback на IRC.
 func (r *Runtime) Say(text string) error {
+	if err := r.sayAPI(text); err == nil {
+		return nil
+	}
+
 	r.mu.Lock()
 	irc := r.irc
 	r.mu.Unlock()
@@ -122,6 +126,47 @@ func (r *Runtime) Say(text string) error {
 	}
 
 	return irc.Say(text)
+}
+
+func (r *Runtime) sayAPI(text string) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"broadcaster_id": broadcasterID,
+		"sender_id":      broadcasterID,
+		"message":        text,
+	})
+	if err != nil {
+		return err
+	}
+
+	request, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		"https://api.twitch.tv/helix/chat/messages",
+		strings.NewReader(string(payload)),
+	)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("chat messages returned %d", response.StatusCode)
+	}
+
+	return nil
 }
 
 // DeleteMessage удаляет сообщение через Helix.
