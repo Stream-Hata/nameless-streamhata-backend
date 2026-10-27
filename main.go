@@ -694,9 +694,6 @@ func (a commandActioner) Twitch(ctx context.Context, action, userID string) stri
 
 func (a commandActioner) resolveTarget(ctx context.Context, message twitch.TwitchChatMessage, value string) (string, string, error) {
 	fields := strings.Fields(strings.TrimSpace(value))
-	if len(fields) == 0 || strings.HasPrefix(fields[0], "@") == false && !strings.Contains(fields[0], " ") {
-		// Bare values are treated as a target login; empty means the author.
-	}
 	if len(fields) == 0 {
 		return message.Author.ID, "", nil
 	}
