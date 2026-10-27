@@ -95,7 +95,7 @@ type jury struct {
 	message ChatJuryMessage
 	status  string
 	votes   Votes
-	voters  map[string]struct{}
+	voters  map[string]bool
 
 	startedAt time.Time
 	endsAt    time.Time
@@ -238,7 +238,7 @@ func (s *Service) Start(message ChatJuryMessage) *jury {
 		id:        newID(s.startedSequence, now),
 		message:   message,
 		status:    statusVoting,
-		voters:    make(map[string]struct{}),
+		voters:    make(map[string]bool),
 		startedAt: now,
 		endsAt:    now.Add(duration),
 	}
@@ -260,11 +260,19 @@ func (s *Service) Vote(userID string, yea bool) bool {
 		return false
 	}
 
-	if _, voted := j.voters[userID]; voted {
-		return false
+	if previous, voted := j.voters[userID]; voted {
+		if previous == yea {
+			return false
+		}
+
+		if previous {
+			j.votes.Yea--
+		} else {
+			j.votes.Nei--
+		}
 	}
 
-	j.voters[userID] = struct{}{}
+	j.voters[userID] = yea
 
 	if yea {
 		j.votes.Yea++

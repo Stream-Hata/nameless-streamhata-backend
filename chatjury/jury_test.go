@@ -62,9 +62,13 @@ func TestJuryVotingLifecycle(t *testing.T) {
 		t.Fatal("duplicate vote must be rejected")
 	}
 
+	if !service.Vote("3", true) {
+		t.Fatal("vote change must be accepted")
+	}
+
 	current := service.GetCurrentPublic()
 
-	if current == nil || current.Votes.Yea != 2 || current.Votes.Nei != 1 {
+	if current == nil || current.Votes.Yea != 3 || current.Votes.Nei != 0 {
 		t.Fatalf("unexpected current public: %+v", current)
 	}
 
@@ -80,11 +84,11 @@ func TestJuryVotingLifecycle(t *testing.T) {
 		t.Fatal("expected result after timeout")
 	}
 
-	if result.Total != 3 || result.Yea != 2 || result.Status != statusFinished {
+	if result.Total != 3 || result.Yea != 3 || result.Status != statusFinished {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 
-	if result.Approval < 0.66 || result.Approval > 0.67 {
+	if result.Approval < 0.99 || result.Approval > 1 {
 		t.Fatalf("unexpected approval: %v", result.Approval)
 	}
 
