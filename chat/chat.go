@@ -16,12 +16,13 @@ type Writer interface {
 
 // Service — кольцевой буфер чата с дедупликацией и подписчиками.
 type Service struct {
-	mu       sync.Mutex
-	messages []twitch.TwitchChatMessage
-	seen     map[string]struct{}
-	max      int
-	sinks    map[int]Sink
-	nextID   int
+	mu        sync.Mutex
+	messages  []twitch.TwitchChatMessage
+	seen      map[string]struct{}
+	channelID string
+	max       int
+	sinks     map[int]Sink
+	nextID    int
 }
 
 func NewService(maxMessages int) *Service {
@@ -93,17 +94,37 @@ func (s *Service) Subscribe(sink Sink) func() {
 	}
 }
 
+// SetChannel ограничивает выдачу сообщений текущим каналом.
+func (s *Service) SetChannel(channelID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.channelID = channelID
+}
+
 // Recent возвращает последние limit сообщений (в хронологическом порядке).
 func (s *Service) Recent(limit int) []twitch.TwitchChatMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if limit <= 0 || limit > len(s.messages) {
-		limit = len(s.messages)
+	filtered := s.messages
+
+	if s.channelID != "" {
+		filtered = make([]twitch.TwitchChatMessage, 0, len(s.messages))
+
+		for _, message := range s.messages {
+			if message.Broadcaster.ID == s.channelID {
+				filtered = append(filtered, message)
+			}
+		}
+	}
+
+	if limit <= 0 || limit > len(filtered) {
+		limit = len(filtered)
 	}
 
 	result := make([]twitch.TwitchChatMessage, limit)
-	copy(result, s.messages[len(s.messages)-limit:])
+	copy(result, filtered[len(filtered)-limit:])
 
 	return result
 }

@@ -539,6 +539,51 @@ func urlQueryEscape(value string) string {
 	return url.QueryEscape(value)
 }
 
+// ChatBadges возвращает карту badge set/version -> URL картинки.
+func (r *Runtime) ChatBadges(ctx context.Context) (map[string]string, error) {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]string)
+	endpoints := []string{
+		"https://api.twitch.tv/helix/chat/badges/global",
+		fmt.Sprintf("https://api.twitch.tv/helix/chat/badges?broadcaster_id=%s", broadcasterID),
+	}
+
+	for _, endpoint := range endpoints {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Client-Id", r.clientID)
+
+		var payload struct {
+			Data []struct {
+				SetID    string `json:"set_id"`
+				Versions []struct {
+					ID    string `json:"id"`
+					Image string `json:"image_url_1x"`
+				} `json:"versions"`
+			} `json:"data"`
+		}
+		if err := r.doJSON(request, &payload); err != nil {
+			return nil, err
+		}
+		for _, set := range payload.Data {
+			for _, version := range set.Versions {
+				if set.SetID != "" && version.ID != "" && version.Image != "" {
+					result[set.SetID+"/"+version.ID] = version.Image
+				}
+			}
+		}
+	}
+
+	return result, nil
+}
+
 // ListChannelRewards возвращает управляемые награды канала.
 func (r *Runtime) ListChannelRewards(ctx context.Context) ([]twitch.ChannelReward, error) {
 	token, broadcasterID, err := r.credentials()
@@ -1021,6 +1066,7 @@ func (r *Runtime) connect(ctx context.Context) error {
 		return err
 	}
 
+	r.chat.SetChannel(broadcaster.ID)
 	r.launchClients(ctx, accessToken, broadcaster)
 	r.setStatus("подключён: #" + broadcaster.Login)
 

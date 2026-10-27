@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -424,6 +425,18 @@ func main() {
 		go pointsService.HandleMessage(message)
 		go gamesService.HandleMessage(message)
 		go quotesService.HandleMessage(message)
+	})
+
+	srv.ServeEndpoint("/rgg-sync/chat/badges", func(response http.ResponseWriter, request *http.Request) {
+		badges, err := chatRuntime.ChatBadges(request.Context())
+		if err != nil {
+			http.Error(response, err.Error(), http.StatusBadGateway)
+
+			return
+		}
+
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(response).Encode(map[string]any{"badges": badges})
 	})
 
 	registry := integrations.NewRegistry()
