@@ -818,11 +818,16 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 				count, sides = 1, 6
 			}
 		}
+		rolls := make([]int, 0, count)
 		total := 0
 		for i := 0; i < count; i++ {
-			total += rand.Intn(sides) + 1
+			roll := rand.Intn(sides) + 1
+			rolls = append(rolls, roll)
+			total += roll
 		}
-		return fmt.Sprintf("%dd%d: %d", count, sides, total), nil, true
+		formula := fmt.Sprintf("%dd%d", count, sides)
+		a.sync.RollDice(formula, total, rolls, message.Author.DisplayName)
+		return fmt.Sprintf("%s: %d", formula, total), nil, true
 	case "coinflip":
 		if rand.Intn(2) == 0 {
 			return "орёл", nil, true

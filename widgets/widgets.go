@@ -13,20 +13,21 @@ const storageKey = "widgets"
 const configsKey = "widget_configs"
 
 var defaultWidgets = map[string]bool{
-	"jury":      true,
-	"timer":     true,
-	"hotbar":    true,
-	"roulette":  true,
-	"alerts":    false,
-	"events":    false,
-	"donations": true,
-	"audio":     true,
-	"wheel":     false,
-	"chat":      true,
-	"points":    false,
-	"music":     false,
+	"jury":       true,
+	"timer":      true,
+	"hotbar":     true,
+	"roulette":   true,
+	"alerts":     false,
+	"events":     false,
+	"donations":  true,
+	"audio":      true,
+	"wheel":      false,
+	"chat":       true,
+	"points":     false,
+	"music":      false,
 	"nowplaying": false,
-	"streaks":   true,
+	"streaks":    true,
+	"dice":       false,
 }
 
 type Service struct {

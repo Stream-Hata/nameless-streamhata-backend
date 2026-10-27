@@ -31,11 +31,20 @@ type HotbarState struct {
 	Platforms []PlatformInfo `json:"platforms"`
 }
 
+type DiceState struct {
+	Formula  string    `json:"formula"`
+	Result   int       `json:"result"`
+	Rolls    []int     `json:"rolls"`
+	Viewer   string    `json:"viewer"`
+	RolledAt time.Time `json:"rolledAt"`
+}
+
 // AppState — форма состояния, которую ждёт фронт (AppBackendState).
 type AppState struct {
 	Mode        string      `json:"mode"`
 	TimerState  TimerState  `json:"timerState"`
 	HotbarState HotbarState `json:"hotbarState"`
+	DiceState   DiceState   `json:"diceState"`
 }
 
 // Patch — частичное обновление (поля-указатели = «не менять»).
@@ -69,6 +78,10 @@ func New() *Service {
 			},
 			HotbarState: HotbarState{
 				Platforms: []PlatformInfo{},
+			},
+			DiceState: DiceState{
+				Formula: "1d6",
+				Rolls:   []int{},
 			},
 		},
 		lastTimerUpdate: time.Now(),
@@ -185,6 +198,15 @@ func RegisterRoutes(srv Deps, service *Service) {
 
 	srv.ServeEndpoint("/rgg-sync", handler)
 	srv.ServeEndpoint("/rgg-sync/", handler)
+	srv.ServeEndpoint("/rgg-sync/dice", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		writeJSON(response, http.StatusOK, service.GetDice())
+	})
 }
 
 func writeJSON(response http.ResponseWriter, status int, payload any) {
@@ -192,6 +214,30 @@ func writeJSON(response http.ResponseWriter, status int, payload any) {
 	response.WriteHeader(status)
 
 	_ = json.NewEncoder(response).Encode(payload)
+}
+
+// RollDice stores the latest dice result for the overlay.
+func (s *Service) RollDice(formula string, result int, rolls []int, viewer string) DiceState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.state.DiceState = DiceState{
+		Formula:  formula,
+		Result:   result,
+		Rolls:    append([]int(nil), rolls...),
+		Viewer:   viewer,
+		RolledAt: time.Now(),
+	}
+
+	return s.state.DiceState
+}
+
+// GetDice returns the latest dice result.
+func (s *Service) GetDice() DiceState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.state.DiceState
 }
 
 // SetTimer sets timer mode and absolute time in seconds.
