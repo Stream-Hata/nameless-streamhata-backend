@@ -154,7 +154,10 @@ func (s *Service) HandleMessage() {
 	defer s.mu.Unlock()
 
 	if s.current == nil {
-		return
+		s.current = &Session{
+			ID:        fmt.Sprintf("session-%d", s.now().UnixNano()),
+			StartedAt: s.now().UTC(),
+		}
 	}
 
 	s.current.Messages++
