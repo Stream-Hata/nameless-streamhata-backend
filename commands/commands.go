@@ -49,6 +49,7 @@ type Actioner interface {
 	WheelEntry(userID, login, displayName, title string, bet int) error
 	AddMusic(ctx context.Context, url, addedBy string) error
 	Clip(ctx context.Context) error
+	Twitch(ctx context.Context, action, userID string) string
 }
 
 type VariableResolver func(name string) string
@@ -160,7 +161,7 @@ func (s *Service) Upsert(command Command) (Command, error) {
 		command.Action = "say"
 	}
 
-	if command.Action != "say" && command.Action != "points" && command.Action != "timeout" && command.Action != "wheel" && command.Action != "music" && command.Action != "clip" && command.Action != "lastmusic" {
+	if command.Action != "say" && command.Action != "points" && command.Action != "timeout" && command.Action != "wheel" && command.Action != "music" && command.Action != "clip" && command.Action != "lastmusic" && !strings.HasPrefix(command.Action, "twitch.") {
 		return Command{}, fmt.Errorf("неизвестное действие команды")
 	}
 
@@ -427,6 +428,15 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 			_ = s.actioner.Clip(context.Background())
 
 			return
+		default:
+			if strings.HasPrefix(command.Action, "twitch.") {
+				text := s.actioner.Twitch(context.Background(), command.Action, message.Author.ID)
+				if text != "" && s.writer != nil {
+					_ = s.writer.Say(text)
+				}
+
+				return
+			}
 		case "lastmusic":
 			if s.writer != nil {
 				_ = s.writer.Say(s.expand("Сейчас играет: $(lastmusic)"))

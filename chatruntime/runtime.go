@@ -295,6 +295,99 @@ func (r *Runtime) CreateClip(ctx context.Context) (string, error) {
 	return payload.Data[0].EditURL, nil
 }
 
+// FollowerSince возвращает дату подписки пользователя на канал.
+func (r *Runtime) FollowerSince(ctx context.Context, userID string) (string, error) {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return "", err
+	}
+
+	endpoint := fmt.Sprintf(
+		"https://api.twitch.tv/helix/channels/followers?broadcaster_id=%s&user_id=%s",
+		broadcasterID, urlQueryEscape(userID),
+	)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	var payload struct {
+		Data []struct {
+			FollowedAt string `json:"followed_at"`
+		} `json:"data"`
+	}
+	if err := r.doJSON(request, &payload); err != nil {
+		return "", err
+	}
+	if len(payload.Data) == 0 {
+		return "", errors.New("not following")
+	}
+
+	return payload.Data[0].FollowedAt, nil
+}
+
+// StreamStartedAt возвращает время начала текущего стрима.
+func (r *Runtime) StreamStartedAt(ctx context.Context) (string, error) {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return "", err
+	}
+
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/streams?user_id=%s", broadcasterID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	var payload struct {
+		Data []struct {
+			StartedAt string `json:"started_at"`
+		} `json:"data"`
+	}
+	if err := r.doJSON(request, &payload); err != nil {
+		return "", err
+	}
+	if len(payload.Data) == 0 {
+		return "", errors.New("stream offline")
+	}
+
+	return payload.Data[0].StartedAt, nil
+}
+
+// AccountCreatedAt возвращает дату регистрации пользователя Twitch.
+func (r *Runtime) AccountCreatedAt(ctx context.Context, userID string) (string, error) {
+	token, _, err := r.credentials()
+	if err != nil {
+		return "", err
+	}
+
+	endpoint := "https://api.twitch.tv/helix/users?id=" + urlQueryEscape(userID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	var payload struct {
+		Data []struct {
+			CreatedAt string `json:"created_at"`
+		} `json:"data"`
+	}
+	if err := r.doJSON(request, &payload); err != nil {
+		return "", err
+	}
+	if len(payload.Data) == 0 {
+		return "", errors.New("user not found")
+	}
+
+	return payload.Data[0].CreatedAt, nil
+}
+
 // GetChannelInfo возвращает title и категорию канала.
 func (r *Runtime) GetChannelInfo(ctx context.Context) (string, string, string, error) {
 	token, broadcasterID, err := r.credentials()

@@ -604,6 +604,41 @@ func (a commandActioner) AddMusic(ctx context.Context, url, addedBy string) erro
 	return nil
 }
 
+func (a commandActioner) Twitch(ctx context.Context, action, userID string) string {
+	switch action {
+	case "twitch.followage":
+		value, err := a.chat.FollowerSince(ctx, userID)
+		if err == nil {
+			return "Фолловер с " + value
+		}
+	case "twitch.accountage":
+		value, err := a.chat.AccountCreatedAt(ctx, userID)
+		if err == nil {
+			return "Аккаунт создан " + value
+		}
+	case "twitch.uptime":
+		value, err := a.chat.StreamStartedAt(ctx)
+		if err == nil {
+			return "Стрим идёт с " + value
+		}
+	case "twitch.viewers":
+		value, err := a.chat.GetStreamViewers(ctx)
+		if err == nil {
+			return fmt.Sprintf("Зрителей: %d", value)
+		}
+	case "twitch.title", "twitch.game":
+		title, game, _, err := a.chat.GetChannelInfo(ctx)
+		if err == nil {
+			if action == "twitch.title" {
+				return "Заголовок: " + title
+			}
+			return "Категория: " + game
+		}
+	}
+
+	return ""
+}
+
 func (a commandActioner) Clip(ctx context.Context) error {
 	url, err := a.chat.CreateClip(ctx)
 	if err != nil {
