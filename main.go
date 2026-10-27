@@ -393,6 +393,7 @@ func main() {
 		}
 
 		go commandsService.HandleMessage(message)
+		analyticsService.HandleMessage()
 		go moderationService.HandleMessage(ctx, message)
 
 		if action, _, ok := triggersService.Match(message.Text); ok && action == "clips.clip" {
