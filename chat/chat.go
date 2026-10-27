@@ -16,13 +16,13 @@ type Writer interface {
 
 // Service — кольцевой буфер чата с дедупликацией и подписчиками.
 type Service struct {
-	mu        sync.Mutex
-	messages  []twitch.TwitchChatMessage
-	seen      map[string]struct{}
-	channelID string
-	max       int
-	sinks     map[int]Sink
-	nextID    int
+	mu       sync.Mutex
+	messages []twitch.TwitchChatMessage
+	seen     map[string]struct{}
+	channels map[string]struct{}
+	max      int
+	sinks    map[int]Sink
+	nextID   int
 }
 
 func NewService(maxMessages int) *Service {
@@ -33,6 +33,7 @@ func NewService(maxMessages int) *Service {
 	return &Service{
 		messages: make([]twitch.TwitchChatMessage, 0, maxMessages),
 		seen:     make(map[string]struct{}),
+		channels: make(map[string]struct{}),
 		max:      maxMessages,
 		sinks:    make(map[int]Sink),
 	}
@@ -94,12 +95,17 @@ func (s *Service) Subscribe(sink Sink) func() {
 	}
 }
 
-// SetChannel ограничивает выдачу сообщений текущим каналом.
+// SetChannel добавляет канал в активный набор.
+// При переподключении к другому каналу оба остаются видимыми.
 func (s *Service) SetChannel(channelID string) {
+	if channelID == "" {
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.channelID = channelID
+	s.channels[channelID] = struct{}{}
 }
 
 // Recent возвращает последние limit сообщений (в хронологическом порядке).
@@ -109,11 +115,11 @@ func (s *Service) Recent(limit int) []twitch.TwitchChatMessage {
 
 	filtered := s.messages
 
-	if s.channelID != "" {
+	if len(s.channels) > 0 {
 		filtered = make([]twitch.TwitchChatMessage, 0, len(s.messages))
 
 		for _, message := range s.messages {
-			if message.Broadcaster.ID == s.channelID {
+			if _, ok := s.channels[message.Broadcaster.ID]; ok {
 				filtered = append(filtered, message)
 			}
 		}
