@@ -415,7 +415,7 @@ func main() {
 			go func() {
 				track := musicService.Current()
 				if track == nil {
-					_ = chatRuntime.Say("Сейчас ничего не играет")
+					_ = chatRuntime.Say("@" + message.Author.Login + ", Сейчас ничего не играет")
 
 					return
 				}
