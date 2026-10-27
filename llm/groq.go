@@ -16,8 +16,39 @@ import (
 const (
 	groqURL          = "https://api.groq.com/openai/v1/chat/completions"
 	defaultGroqModel = "openai/gpt-oss-20b"
-	classifierPrompt = "Ты строгий классификатор сообщений Twitch-чата.\n\nЗадача: определить, содержит ли сообщение ЯВНЫЙ совет или конкретную рекомендацию ДЛЯ СТРИМЕРА.\n\nСчитай советом (is_advice=true) только если выполнены ВСЕ условия:\n- сообщение предлагает стримеру конкретное действие;\n- рекомендация относится именно к стримеру, а не к другому зрителю;\n- это не вопрос, не шутка, не реакция и не простое наблюдение;\n- совет можно сформулировать как «сделай X», «попробуй X», «лучше X», «не делай X».\n\nНЕ считай советом (is_advice=false):\n- вопросы, даже с советом внутри;\n- шутки, мемы, приветствия, реакции, оскорбления;\n- обычные утверждения и описания происходящего;\n- сообщения без конкретного действия;\n- команды бота (!music, !yea, !nei и т.п.);\n- короткие выкрики и игровые комментарии без рекомендации;\n- сообщения, где совет адресован другому зрителю.\n\nЕсли сомневаешься — ставь is_advice=false.\n\nПримеры:\n\"Советую поставить OBS в режим производительности\" -> true, 0.96\n\"Попробуй пройти через лес слева\" -> true, 0.93\n\"Там за бочкой чёрт сидит\" -> false, 0.92 (наблюдение)\n\"Бей его\" -> false, 0.80 (короткий игровой выкрик, если нет контекста рекомендации)\n\"Классно играешь\" -> false, 0.99\n\"Что дальше?\" -> false, 0.99\n\"!yea\" -> false, 1.0\n\nВерни ТОЛЬКО JSON без markdown:\n{\"is_advice\":true,\"confidence\":0.95}\nили:\n{\"is_advice\":false,\"confidence\":0.98}"
-	verdictPrompt    = "You generate a short Russian verdict for a Twitch chat jury.\n\nThe jury voted on whether the streamer's viewer advice should be trusted.\n\nThe approval percentage is calculated from YEA / (YEA + NEI).\n\nWrite ONE short sentence in Russian.\n\nThe sentence must:\n- mention the viewer username;\n- reflect the approval percentage;\n- sound natural and slightly playful;\n- not invent facts;\n- not change the percentage;\n- not mention that you are an AI;\n- not use markdown;\n- not use quotes.\n\nExamples:\n\n\"Совету зрителя nameless можно доверить — доверие 72%.\"\n\n\"Чат почти единогласно доверяет совету nameless — доверие 91%.\"\n\n\"Совет nameless вызвал сомнения у чата — доверие 38%.\"\n\n\"Чат практически забраковал совет nameless — доверие 11%.\""
+	classifierPrompt = `Ты строгий классификатор сообщений Twitch-чата.
+
+Определи, содержит ли сообщение ЯВНУЮ рекомендацию ДЛЯ СТРИМЕРА.
+
+is_advice=true только если:
+- это конкретное действие, которое предлагается сделать стримеру;
+- рекомендация относится именно к стримеру;
+- сообщение не является вопросом, шуткой, реакцией, описанием, мнением или командой бота.
+
+is_advice=false для:
+- вопросов, реакций, шуток, мемов, приветствий;
+- описаний происходящего и обычных утверждений;
+- мнений и оценок;
+- коротких игровых выкриков без рекомендации;
+- команд (!music, !yea, !nei и т.п.);
+- сообщений, где совет адресован другому зрителю.
+
+Если сомневаешься — false.
+
+Примеры:
+"Советую поставить OBS в режим производительности" -> true, 0.96
+"Попробуй пройти через лес слева" -> true, 0.93
+"Там за бочкой чёрт сидит" -> false, 0.92
+"Виджет работает нормально, надо тестить на винде" -> false, 0.95
+"Классно играешь" -> false, 0.99
+"Что дальше?" -> false, 0.99
+"!yea" -> false, 1.0
+
+Верни ТОЛЬКО JSON без markdown:
+{"is_advice":true,"confidence":0.95}
+или:
+{"is_advice":false,"confidence":0.98}`
+	verdictPrompt = "You generate a short Russian verdict for a Twitch chat jury.\n\nThe jury voted on whether the streamer's viewer advice should be trusted.\n\nThe approval percentage is calculated from YEA / (YEA + NEI).\n\nWrite ONE short sentence in Russian.\n\nThe sentence must:\n- mention the viewer username;\n- reflect the approval percentage;\n- sound natural and slightly playful;\n- not invent facts;\n- not change the percentage;\n- not mention that you are an AI;\n- not use markdown;\n- not use quotes.\n\nExamples:\n\n\"Совету зрителя nameless можно доверить — доверие 72%.\"\n\n\"Чат почти единогласно доверяет совету nameless — доверие 91%.\"\n\n\"Совет nameless вызвал сомнения у чата — доверие 38%.\"\n\n\"Чат практически забраковал совет nameless — доверие 11%.\""
 )
 
 var (
