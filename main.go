@@ -243,6 +243,22 @@ func main() {
 	quotes.RegisterRoutes(srv, quotesService)
 
 	commandsService.SetActioner(commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService})
+	commandsService.SetVariableResolver(func(name string) string {
+		switch name {
+		case "lastmusic", "lasttrack", "np":
+			track := musicService.Current()
+			if track == nil {
+				if tracks := musicService.List(); len(tracks) > 0 {
+					track = &tracks[0]
+				}
+			}
+			if track != nil {
+				return track.URL
+			}
+		}
+
+		return ""
+	})
 
 	redemptionsService := redemptions.New(pointsService, chatRuntime, musicDB)
 	redemptionsService.SetWheelEntry(gamesService.EnterWheelWithCost)

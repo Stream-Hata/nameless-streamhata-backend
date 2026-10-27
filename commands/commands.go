@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,15 +50,25 @@ type Actioner interface {
 	Clip(ctx context.Context) error
 }
 
+type VariableResolver func(name string) string
+
 type Service struct {
 	mu        sync.Mutex
 	commands  map[string]*Command
 	cooldowns map[string]time.Time
 
-	writer   chat.Writer
-	actioner Actioner
-	db       *sql.DB
-	now      func() time.Time
+	writer    chat.Writer
+	actioner  Actioner
+	variables VariableResolver
+	db        *sql.DB
+	now       func() time.Time
+}
+
+func (s *Service) SetVariableResolver(resolver VariableResolver) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.variables = resolver
 }
 
 func (s *Service) SetActioner(actioner Actioner) {
@@ -132,7 +143,7 @@ func (s *Service) Upsert(command Command) (Command, error) {
 		command.Action = "say"
 	}
 
-	if command.Action != "say" && command.Action != "points" && command.Action != "timeout" && command.Action != "wheel" && command.Action != "music" && command.Action != "clip" {
+	if command.Action != "say" && command.Action != "points" && command.Action != "timeout" && command.Action != "wheel" && command.Action != "music" && command.Action != "clip" && command.Action != "lastmusic" {
 		return Command{}, fmt.Errorf("неизвестное действие команды")
 	}
 
@@ -246,7 +257,7 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 	s.mu.Unlock()
 
 	s.persist(*command)
-	s.execute(*command, message, response)
+	s.execute(*command, message, s.expand(response))
 }
 
 func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
@@ -260,7 +271,7 @@ func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
 		snapshot := *command
 		response := render(snapshot.Response, message, snapshot.Counter+1)
 		s.mu.Unlock()
-		s.execute(snapshot, message, response)
+		s.execute(snapshot, message, s.expand(response))
 
 		return true
 	}
@@ -268,6 +279,24 @@ func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
 	s.mu.Unlock()
 
 	return false
+}
+
+var variablePattern = regexp.MustCompile(`\$\(([a-z]+)\)`)
+
+func (s *Service) expand(text string) string {
+	if text == "" || s.variables == nil {
+		return text
+	}
+
+	return variablePattern.ReplaceAllStringFunc(text, func(match string) string {
+		name := strings.TrimSuffix(strings.TrimPrefix(match, "$("), ")")
+		value := s.variables(name)
+		if value == "" {
+			return match
+		}
+
+		return value
+	})
 }
 
 func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string) {
@@ -299,6 +328,12 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 			return
 		case "clip":
 			_ = s.actioner.Clip(context.Background())
+
+			return
+		case "lastmusic":
+			if s.writer != nil {
+				_ = s.writer.Say(s.expand("Сейчас играет: $(lastmusic)"))
+			}
 
 			return
 		case "wheel":
