@@ -435,10 +435,13 @@ func main() {
 				editURL, err := chatRuntime.CreateClip(ctx)
 
 				if err != nil || editURL == "" {
+					log.Printf("[Clips] create failed: %v", err)
+					_ = chatRuntime.Say("@" + message.Author.Login + ", не удалось создать клип")
+
 					return
 				}
 
-				_ = chatRuntime.Say("Клип: " + editURL)
+				_ = chatRuntime.Say("@" + message.Author.Login + ", Клип: " + editURL)
 			}()
 		}
 		go ttsService.HandleMessage(message)
