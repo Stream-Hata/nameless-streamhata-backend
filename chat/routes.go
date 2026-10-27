@@ -23,7 +23,8 @@ func RegisterRoutes(srv Deps, service *Service) {
 			}
 		}
 
-		messages := service.Recent(limit)
+		mode := request.URL.Query().Get("mode")
+		messages := service.RecentMode(limit, mode)
 		filtered := messages[:0]
 
 		for _, message := range messages {

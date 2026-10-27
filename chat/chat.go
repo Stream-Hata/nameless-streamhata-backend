@@ -20,6 +20,7 @@ type Service struct {
 	messages []twitch.TwitchChatMessage
 	seen     map[string]struct{}
 	channels map[string]struct{}
+	original string
 	max      int
 	sinks    map[int]Sink
 	nextID   int
@@ -105,17 +106,34 @@ func (s *Service) SetChannel(channelID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.original == "" {
+		s.original = channelID
+	}
+
 	s.channels[channelID] = struct{}{}
 }
 
 // Recent возвращает последние limit сообщений (в хронологическом порядке).
 func (s *Service) Recent(limit int) []twitch.TwitchChatMessage {
+	return s.RecentMode(limit, "all")
+}
+
+// RecentMode: mode="original" оставляет только первый подключённый канал.
+func (s *Service) RecentMode(limit int, mode string) []twitch.TwitchChatMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	filtered := s.messages
 
-	if len(s.channels) > 0 {
+	if mode == "original" && s.original != "" {
+		filtered = make([]twitch.TwitchChatMessage, 0, len(s.messages))
+
+		for _, message := range s.messages {
+			if message.Broadcaster.ID == s.original {
+				filtered = append(filtered, message)
+			}
+		}
+	} else if len(s.channels) > 0 {
 		filtered = make([]twitch.TwitchChatMessage, 0, len(s.messages))
 
 		for _, message := range s.messages {
