@@ -2,8 +2,12 @@ package music
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/p7x-dev/nameless-streamhata-backend/netcfg"
 )
 
 // Deps — минимальный контракт сервера.
@@ -75,6 +79,61 @@ func RegisterRoutes(srv Deps, service *Service) {
 		response.WriteHeader(http.StatusNoContent)
 	})
 
+	srv.ServeEndpoint("/rgg-sync/music/thumbnail", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		videoID := strings.TrimSpace(request.URL.Query().Get("id"))
+
+		if !validVideoID(videoID) {
+			http.Error(response, "invalid video id", http.StatusBadRequest)
+
+			return
+		}
+
+		target := "https://i.ytimg.com/vi/" + videoID + "/hqdefault.jpg"
+		upstream, err := http.NewRequestWithContext(request.Context(), http.MethodGet, target, nil)
+
+		if err != nil {
+			http.Error(response, "invalid thumbnail url", http.StatusBadRequest)
+
+			return
+		}
+
+		upstream.Header.Set("User-Agent", "Mozilla/5.0 (compatible; NamelessStreamHata/1.0)")
+
+		result, err := netcfg.NewHTTPClient(12 * time.Second).Do(upstream)
+
+		if err != nil {
+			http.Error(response, "thumbnail fetch failed", http.StatusBadGateway)
+
+			return
+		}
+
+		defer func() {
+			_ = result.Body.Close()
+		}()
+
+		if result.StatusCode != http.StatusOK {
+			response.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		contentType := result.Header.Get("Content-Type")
+
+		if contentType == "" {
+			contentType = "image/jpeg"
+		}
+
+		response.Header().Set("Content-Type", contentType)
+		response.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+		_, _ = io.Copy(response, io.LimitReader(result.Body, 10<<20))
+	})
+
 	srv.ServeEndpoint("/rgg-sync/music/telegram", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
@@ -111,4 +170,18 @@ func writeJSON(response http.ResponseWriter, status int, payload any) {
 	response.WriteHeader(status)
 
 	_ = json.NewEncoder(response).Encode(payload)
+}
+
+func validVideoID(value string) bool {
+	if len(value) != 11 {
+		return false
+	}
+
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '-' && char != '_' {
+			return false
+		}
+	}
+
+	return true
 }
