@@ -62,7 +62,7 @@ func TestCommandExecutionWithCooldown(t *testing.T) {
 		t.Fatalf("cooldown must suppress second call, got %v", writer.messages)
 	}
 
-	if writer.messages[0] != "Привет, Иван!" {
+	if writer.messages[0] != "@иван, Привет, Иван!" {
 		t.Fatalf("unexpected message: %q", writer.messages[0])
 	}
 
@@ -95,7 +95,7 @@ func TestAliasesAndCounters(t *testing.T) {
 		t.Fatalf("expected alias and name to work, got %v", writer.messages)
 	}
 
-	if writer.messages[0] != "Счётчик: 1" || writer.messages[1] != "Счётчик: 2" {
+	if writer.messages[0] != "@иван, Счётчик: 1" || writer.messages[1] != "@мария, Счётчик: 2" {
 		t.Fatalf("unexpected counters: %v", writer.messages)
 	}
 }

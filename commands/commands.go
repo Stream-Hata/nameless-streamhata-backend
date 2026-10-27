@@ -393,6 +393,8 @@ func (s *Service) expand(text string) string {
 }
 
 func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string) {
+	defer s.sendReply(command, message, response)
+
 	if s.actioner != nil {
 		switch command.Action {
 		case "points":
@@ -444,20 +446,25 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 		}
 	}
 
+}
+
+func (s *Service) sendReply(command Command, message twitch.TwitchChatMessage, response string) {
 	reply := strings.TrimSpace(command.Reply)
 	if reply == "" {
 		reply = response
 	}
 
-	if s.writer != nil && reply != "" {
-		mention := "@" + message.Author.Login
-		if !strings.Contains(strings.ToLower(reply), strings.ToLower(mention)) {
-			reply = mention + ", " + reply
-		}
+	if s.writer == nil || reply == "" {
+		return
+	}
 
-		if err := s.writer.Say(reply); err != nil {
-			log.Printf("[Commands] send failed: %v", err)
-		}
+	mention := "@" + message.Author.Login
+	if !strings.Contains(strings.ToLower(reply), strings.ToLower(mention)) {
+		reply = mention + ", " + reply
+	}
+
+	if err := s.writer.Say(reply); err != nil {
+		log.Printf("[Commands] send failed: %v", err)
 	}
 }
 
