@@ -26,6 +26,7 @@ type Command struct {
 	Aliases         []string  `json:"aliases"`
 	Action          string    `json:"action"`
 	Response        string    `json:"response"`
+	Reply           string    `json:"reply"`
 	CooldownSeconds int       `json:"cooldownSeconds"`
 	UserLevel       string    `json:"userLevel"`
 	Enabled         bool      `json:"enabled"`
@@ -69,6 +70,7 @@ type Service struct {
 	variables VariableResolver
 	custom    map[string]Variable
 	actions   map[string]string
+	replies   map[string]string
 	db        *sql.DB
 	now       func() time.Time
 }
@@ -93,6 +95,7 @@ func New(writer chat.Writer, db *sql.DB) *Service {
 		cooldowns: make(map[string]time.Time),
 		custom:    make(map[string]Variable),
 		actions:   make(map[string]string),
+		replies:   make(map[string]string),
 		writer:    writer,
 		db:        db,
 		now:       time.Now,
@@ -100,6 +103,7 @@ func New(writer chat.Writer, db *sql.DB) *Service {
 
 	service.load()
 	service.loadActions()
+	service.loadReplies()
 	service.loadVariables()
 
 	return service
@@ -216,7 +220,9 @@ func (s *Service) Delete(id string) bool {
 		if command.ID == id {
 			delete(s.commands, name)
 			delete(s.actions, command.ID)
+			delete(s.replies, command.ID)
 			s.persistActions()
+			s.persistReplies()
 
 			if s.db != nil {
 				_, _ = s.db.ExecContext(context.Background(), `DELETE FROM command WHERE id = $1`, id)
@@ -438,8 +444,18 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 		}
 	}
 
-	if s.writer != nil {
-		if err := s.writer.Say(response); err != nil {
+	reply := strings.TrimSpace(command.Reply)
+	if reply == "" {
+		reply = response
+	}
+
+	if s.writer != nil && reply != "" {
+		mention := "@" + message.Author.Login
+		if !strings.Contains(strings.ToLower(reply), strings.ToLower(mention)) {
+			reply = mention + ", " + reply
+		}
+
+		if err := s.writer.Say(reply); err != nil {
 			log.Printf("[Commands] send failed: %v", err)
 		}
 	}
@@ -526,6 +542,12 @@ func (s *Service) loadActions() {
 	}
 
 	_ = json.Unmarshal(raw, &s.actions)
+
+	for _, command := range s.commands {
+		if action := s.actions[command.ID]; action != "" {
+			command.Action = action
+		}
+	}
 }
 
 func (s *Service) persistActions() {
@@ -539,6 +561,39 @@ func (s *Service) persistActions() {
 	}
 
 	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_actions', $1)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+}
+
+func (s *Service) loadReplies() {
+	if s.db == nil {
+		return
+	}
+
+	var raw []byte
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'command_replies'`).Scan(&raw); err != nil {
+		return
+	}
+
+	_ = json.Unmarshal(raw, &s.replies)
+
+	for _, command := range s.commands {
+		if reply := s.replies[command.ID]; reply != "" {
+			command.Reply = reply
+		}
+	}
+}
+
+func (s *Service) persistReplies() {
+	if s.db == nil {
+		return
+	}
+
+	raw, err := json.Marshal(s.replies)
+	if err != nil {
+		return
+	}
+
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_replies', $1)
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
 }
 
@@ -656,6 +711,9 @@ func (s *Service) load() {
 		command.Action = "say"
 		if action := s.actions[command.ID]; action != "" {
 			command.Action = action
+		}
+		if reply := s.replies[command.ID]; reply != "" {
+			command.Reply = reply
 		}
 		s.commands[command.Name] = &command
 	}

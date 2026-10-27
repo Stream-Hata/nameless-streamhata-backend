@@ -420,7 +420,7 @@ func main() {
 					return
 				}
 
-				_ = chatRuntime.Say("Сейчас играет: " + track.URL)
+				_ = chatRuntime.Say("@" + message.Author.Login + ", Сейчас играет: " + track.URL)
 			}()
 
 			return
