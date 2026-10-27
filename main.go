@@ -379,6 +379,7 @@ func main() {
 	chatRuntime.SetOnConnected(func(user twitch.ChatUser) {
 		timersService.SetChannel(user.Login)
 		sevenTVService.SetChannel(user.ID)
+		pointsService.SetChannel(user.ID)
 	})
 
 	if err := chatRuntime.Start(ctx); err != nil {

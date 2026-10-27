@@ -91,10 +91,11 @@ type Service struct {
 
 	cooldowns map[string]time.Time
 
-	writer   chat.Writer
-	db       *sql.DB
-	now      func() time.Time
-	triggers *triggers.Service
+	writer    chat.Writer
+	channelID string
+	db        *sql.DB
+	now       func() time.Time
+	triggers  *triggers.Service
 }
 
 func New(writer chat.Writer, db *sql.DB) *Service {
@@ -408,6 +409,26 @@ func (s *Service) RecentTransactions(limit int) []Transaction {
 /* ── Начисления ───────────────────────────────────────────────────── */
 
 // SetTriggers подключает настраиваемые стримером команды.
+// SetChannel сбрасывает баллы при смене канала, чтобы топ не смешивался.
+func (s *Service) SetChannel(channelID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if channelID == "" || channelID == s.channelID {
+		return
+	}
+
+	s.channelID = channelID
+	s.wallets = make(map[string]*Wallet)
+	s.history = make(map[string][]Transaction)
+	s.transacion = nil
+
+	if s.db != nil {
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM points_transaction`)
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM points_wallet`)
+	}
+}
+
 func (s *Service) SetTriggers(service *triggers.Service) {
 	s.triggers = service
 }
