@@ -1222,6 +1222,248 @@ func (r *Runtime) BanUser(ctx context.Context, userID, reason string) error {
 	return nil
 }
 
+// UserIDByLogin resolves a Twitch login to a user ID.
+func (r *Runtime) UserIDByLogin(ctx context.Context, login string) (string, error) {
+	token, _, err := r.credentials()
+	if err != nil {
+		return "", err
+	}
+
+	endpoint := "https://api.twitch.tv/helix/users?login=" + urlQueryEscape(strings.TrimPrefix(strings.TrimSpace(login), "@"))
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+
+	if err := r.doJSON(request, &payload); err != nil {
+		return "", err
+	}
+	if len(payload.Data) == 0 {
+		return "", errors.New("пользователь не найден")
+	}
+
+	return payload.Data[0].ID, nil
+}
+
+// Announcement sends a chat announcement.
+func (r *Runtime) Announcement(ctx context.Context, text string) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"broadcaster_id": broadcasterID,
+		"moderator_id":   broadcasterID,
+		"message":        text,
+	})
+	if err != nil {
+		return err
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.twitch.tv/helix/chat/announcements", strings.NewReader(string(payload)))
+	if err != nil {
+		return err
+	}
+
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("announcements returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
+// Shoutout sends a Twitch shoutout to a channel.
+func (r *Runtime) Shoutout(ctx context.Context, login string) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	targetID, err := r.UserIDByLogin(ctx, login)
+	if err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"from_broadcaster_id": broadcasterID,
+		"to_broadcaster_id":   targetID,
+		"moderator_id":        broadcasterID,
+	})
+	if err != nil {
+		return err
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.twitch.tv/helix/chat/shoutouts", strings.NewReader(string(payload)))
+	if err != nil {
+		return err
+	}
+
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("shoutouts returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
+// StartRaid starts a raid to a channel login.
+func (r *Runtime) StartRaid(ctx context.Context, login string) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	targetID, err := r.UserIDByLogin(ctx, login)
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/raids?from_broadcaster_id=%s&to_broadcaster_id=%s", broadcasterID, targetID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return err
+	}
+
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("raids returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
+// CancelRaid cancels the current raid.
+func (r *Runtime) CancelRaid(ctx context.Context) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/raids?broadcaster_id=%s", broadcasterID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("raids cancel returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
+// CreateMarker creates a stream marker.
+func (r *Runtime) CreateMarker(ctx context.Context, description string) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"user_id":     broadcasterID,
+		"description": description,
+	})
+	if err != nil {
+		return err
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.twitch.tv/helix/streams/markers", strings.NewReader(string(payload)))
+	if err != nil {
+		return err
+	}
+
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
+		return fmt.Errorf("markers returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
+// UnbanUser removes a ban.
+func (r *Runtime) UnbanUser(ctx context.Context, userID string) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/moderation/bans?broadcaster_id=%s&moderator_id=%s&user_id=%s", broadcasterID, broadcasterID, urlQueryEscape(userID))
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return err
+	}
+
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("unban returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
 /* ── Контракт integrations.Component ──────────────────────────────── */
 
 func (r *Runtime) ID() string {

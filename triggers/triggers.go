@@ -84,6 +84,18 @@ func (s *Service) Update(list []Trigger) ([]Trigger, error) {
 	for _, item := range defaults() {
 		known[item.Action] = true
 	}
+	for _, action := range []string{
+		"say", "announce", "shoutout", "raid", "raid.cancel", "marker", "clip", "delete", "ban", "unban",
+		"timeout", "shield.on", "shield.off", "title.set", "game.set", "commercial", "poll", "poll.end",
+		"points.add", "points.remove", "points.set", "points.balance", "points.top", "points.shop",
+		"points.redeem", "music.add", "music.current", "lastmusic", "wheel", "games.slots", "games.wheel",
+		"games.trivia", "games.duel", "games.accept", "quote.add", "quotes.random", "dice", "coinflip",
+		"random", "variable.set", "variable.inc", "variable.dec", "command.run", "timer.start",
+		"timer.pause", "timer.reset", "timer.add", "twitch.followage", "twitch.accountage", "twitch.uptime",
+		"twitch.viewers", "twitch.title", "twitch.game", "twitch.followers", "twitch.subscribers", "twitch.chatters",
+	} {
+		known[action] = true
+	}
 
 	seen := map[string]bool{}
 	next := make([]Trigger, 0, len(list))

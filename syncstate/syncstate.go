@@ -193,3 +193,38 @@ func writeJSON(response http.ResponseWriter, status int, payload any) {
 
 	_ = json.NewEncoder(response).Encode(payload)
 }
+
+// SetTimer sets timer mode and absolute time in seconds.
+func (s *Service) SetTimer(mode string, seconds int) AppState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.state.TimerState.Mode = mode
+	s.state.TimerState.Time = Time{
+		Hours:   seconds / 3600,
+		Minutes: (seconds % 3600) / 60,
+		Seconds: seconds % 60,
+	}
+	s.lastTimerUpdate = time.Now()
+
+	return s.state
+}
+
+// AddTimer adds seconds to the current timer.
+func (s *Service) AddTimer(seconds int) AppState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	total := s.state.TimerState.Time.Hours*3600 + s.state.TimerState.Time.Minutes*60 + s.state.TimerState.Time.Seconds + seconds
+	if total < 0 {
+		total = 0
+	}
+	s.state.TimerState.Time = Time{
+		Hours:   total / 3600,
+		Minutes: (total % 3600) / 60,
+		Seconds: total % 60,
+	}
+	s.lastTimerUpdate = time.Now()
+
+	return s.state
+}

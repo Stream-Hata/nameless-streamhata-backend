@@ -116,6 +116,9 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 			"channel:manage:polls "+
 			"channel:read:predictions "+
 			"channel:manage:broadcast "+
+			"moderator:manage:announcements "+
+			"moderator:manage:shoutouts "+
+			"channel:manage:raids "+
 			"moderator:read:shield_mode "+
 			"moderator:manage:shield_mode "+
 			"bits:read "+

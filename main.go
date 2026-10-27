@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -242,7 +244,8 @@ func main() {
 	quotesService.SetTriggers(triggersService)
 	quotes.RegisterRoutes(srv, quotesService)
 
-	commandsService.SetActioner(commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService, quotes: quotesService})
+	actioner := commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService, quotes: quotesService, sync: syncService, commands: commandsService}
+	commandsService.SetActioner(actioner)
 	commandsService.SetVariableResolver(func(name string) string {
 		switch name {
 		case "lastmusic", "lasttrack", "np", "now":
@@ -427,11 +430,31 @@ func main() {
 			return
 		}
 
+		if action, args, ok := triggersService.Match(message.Text); ok {
+			if action == "say" {
+				if text := strings.TrimSpace(strings.Join(args, " ")); text != "" {
+					_ = chatRuntime.Say(text)
+				}
+
+				return
+			}
+
+			if text, err, handled := actioner.Perform(ctx, action, strings.Join(args, " "), message); handled {
+				if err != nil {
+					log.Printf("[Triggers] %s failed: %v", action, err)
+				} else if text != "" {
+					_ = chatRuntime.Say("@" + message.Author.Login + ", " + text)
+				}
+
+				return
+			}
+		}
+
 		go commandsService.HandleMessage(message)
 		analyticsService.HandleMessage()
 		go moderationService.HandleMessage(ctx, message)
 
-		if action, _, ok := triggersService.Match(message.Text); ok && action == "clips.clip" {
+		if action, _, ok := triggersService.Match(message.Text); ok && (action == "clips.clip" || action == "clip") {
 			go func() {
 				clip, err := chatRuntime.CreateClipInfo(ctx)
 
@@ -572,11 +595,13 @@ func registerDonations(srv server.Server, ctx context.Context, db *sql.DB) *dona
 }
 
 type commandActioner struct {
-	points *points.Service
-	games  *games.Service
-	chat   *chatruntime.Runtime
-	music  *music.Service
-	quotes *quotes.Service
+	points   *points.Service
+	games    *games.Service
+	chat     *chatruntime.Runtime
+	music    *music.Service
+	quotes   *quotes.Service
+	sync     *syncstate.Service
+	commands *commands.Service
 }
 
 func (a commandActioner) AwardPoints(userID, login, displayName string, amount int, reason string) error {
@@ -665,6 +690,234 @@ func (a commandActioner) Twitch(ctx context.Context, action, userID string) stri
 	}
 
 	return ""
+}
+
+func (a commandActioner) resolveTarget(ctx context.Context, message twitch.TwitchChatMessage, value string) (string, string, error) {
+	fields := strings.Fields(strings.TrimSpace(value))
+	if len(fields) == 0 || strings.HasPrefix(fields[0], "@") == false && !strings.Contains(fields[0], " ") {
+		// Bare values are treated as a target login; empty means the author.
+	}
+	if len(fields) == 0 {
+		return message.Author.ID, "", nil
+	}
+	login := strings.TrimPrefix(fields[0], "@")
+	if strings.EqualFold(login, "me") || strings.EqualFold(login, "self") {
+		return message.Author.ID, strings.Join(fields[1:], " "), nil
+	}
+	id, err := a.chat.UserIDByLogin(ctx, login)
+	if err != nil {
+		return "", "", err
+	}
+
+	return id, strings.Join(fields[1:], " "), nil
+}
+
+func (a commandActioner) Perform(ctx context.Context, action, value string, message twitch.TwitchChatMessage) (string, error, bool) {
+	switch action {
+	case "say":
+		return value, nil, true
+	case "points.add", "points.remove", "points.set":
+		amount, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return "", fmt.Errorf("нужно число"), true
+		}
+
+		delta := amount
+		if action == "points.remove" {
+			delta = -amount
+		}
+		if action == "points.set" {
+			wallet, _ := a.points.Wallet(message.Author.ID)
+			delta = amount - wallet.Balance
+		}
+		a.points.Add(message.Author.ID, message.Author.Login, message.Author.DisplayName, delta, "command")
+
+		return fmt.Sprintf("баланс: %d", amount), nil, true
+	case "ban":
+		targetID, reason, err := a.resolveTarget(ctx, message, value)
+		if err != nil {
+			return "", err, true
+		}
+		if reason == "" {
+			reason = "command"
+		}
+		return "", a.chat.BanUser(ctx, targetID, reason), true
+	case "unban":
+		targetID, _, err := a.resolveTarget(ctx, message, value)
+		if err != nil {
+			return "", err, true
+		}
+		return "пользователь разбанен", a.chat.UnbanUser(ctx, targetID), true
+	case "delete":
+		messageID := strings.TrimSpace(value)
+		if messageID == "" {
+			messageID = message.MessageID
+		}
+		return "", a.chat.DeleteMessage(ctx, messageID), true
+	case "announce":
+		return "", a.chat.Announcement(ctx, strings.TrimSpace(value)), true
+	case "shoutout":
+		return "шаут отправлен", a.chat.Shoutout(ctx, strings.TrimSpace(value)), true
+	case "raid":
+		return "рейд запущен", a.chat.StartRaid(ctx, strings.TrimSpace(value)), true
+	case "raid.cancel":
+		return "рейд отменён", a.chat.CancelRaid(ctx), true
+	case "marker":
+		return "маркер создан", a.chat.CreateMarker(ctx, strings.TrimSpace(value)), true
+	case "shield.on":
+		return "shield mode включён", a.chat.UpdateShieldMode(ctx, true), true
+	case "shield.off":
+		return "shield mode выключен", a.chat.UpdateShieldMode(ctx, false), true
+	case "title.set":
+		return "заголовок обновлён", a.chat.UpdateChannel(ctx, strings.TrimSpace(value), ""), true
+	case "game.set":
+		gameID, _, err := a.chat.SearchGame(ctx, strings.TrimSpace(value))
+		if err != nil {
+			return "", err, true
+		}
+		return "категория обновлена", a.chat.UpdateChannel(ctx, "", gameID), true
+	case "commercial":
+		seconds, _ := strconv.Atoi(strings.TrimSpace(value))
+		if seconds <= 0 {
+			seconds = 60
+		}
+		return "реклама запущена", a.chat.StartCommercial(ctx, seconds), true
+	case "poll.end":
+		parts := strings.Fields(value)
+		if len(parts) == 0 {
+			return "", fmt.Errorf("нужен id опроса"), true
+		}
+		status := "TERMINATED"
+		if len(parts) > 1 {
+			status = strings.ToUpper(parts[1])
+		}
+		return "опрос завершён", a.chat.EndPoll(ctx, parts[0], status), true
+	case "poll":
+		parts := strings.Split(value, "|")
+		if len(parts) < 3 {
+			return "", fmt.Errorf("формат: вопрос | вариант 1 | вариант 2 | секунды"), true
+		}
+		duration := 60
+		if parsed, err := strconv.Atoi(strings.TrimSpace(parts[len(parts)-1])); err == nil {
+			duration = parsed
+			parts = parts[:len(parts)-1]
+		}
+		title := strings.TrimSpace(parts[0])
+		choices := make([]string, 0, len(parts)-1)
+		for _, item := range parts[1:] {
+			if choice := strings.TrimSpace(item); choice != "" {
+				choices = append(choices, choice)
+			}
+		}
+		if title == "" || len(choices) < 2 {
+			return "", fmt.Errorf("нужны вопрос и минимум два варианта"), true
+		}
+		_, err := a.chat.CreatePoll(ctx, title, choices, duration)
+		return "голосование запущено", err, true
+	case "dice":
+		count, sides := 1, 6
+		if raw := strings.ToLower(strings.TrimSpace(value)); raw != "" {
+			if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err != nil || count < 1 || count > 20 || sides < 2 || sides > 1000 {
+				count, sides = 1, 6
+			}
+		}
+		total := 0
+		for i := 0; i < count; i++ {
+			total += rand.Intn(sides) + 1
+		}
+		return fmt.Sprintf("%dd%d: %d", count, sides, total), nil, true
+	case "coinflip":
+		if rand.Intn(2) == 0 {
+			return "орёл", nil, true
+		}
+		return "решка", nil, true
+	case "quote.add":
+		quote, err := a.quotes.Add(strings.TrimSpace(value), message.Author.DisplayName, message.Author.Login)
+		if err != nil {
+			return "", err, true
+		}
+		return fmt.Sprintf("цитата #%d добавлена", quote.Number), nil, true
+	case "points.redeem":
+		return a.points.Redeem(message, strings.TrimSpace(value)), nil, true
+	case "games.slots":
+		stake, _ := strconv.Atoi(strings.TrimSpace(value))
+		return a.games.Slots(message, stake), nil, true
+	case "games.wheel":
+		stake, _ := strconv.Atoi(strings.TrimSpace(value))
+		return a.games.Wheel(message, stake), nil, true
+	case "games.trivia":
+		return a.games.Trivia(message), nil, true
+	case "games.duel":
+		return a.games.Duel(message, strings.Fields(value)), nil, true
+	case "games.accept":
+		return a.games.AcceptDuel(message), nil, true
+	case "lastmusic":
+		track := a.music.Current()
+		if track == nil {
+			return "сейчас ничего не играет", nil, true
+		}
+		return "сейчас играет: " + track.URL, nil, true
+	case "timeout":
+		seconds, _ := strconv.Atoi(strings.TrimSpace(value))
+		if seconds <= 0 {
+			seconds = 60
+		}
+		return "", a.chat.TimeoutUser(ctx, message.Author.ID, seconds, "command"), true
+	case "music.current":
+		track := a.music.Current()
+		if track == nil {
+			return "сейчас ничего не играет", nil, true
+		}
+		return "сейчас играет: " + track.URL, nil, true
+	case "timer.start":
+		seconds, _ := strconv.Atoi(strings.TrimSpace(value))
+		if seconds > 0 {
+			a.sync.SetTimer("play", seconds)
+		} else {
+			a.sync.SetTimer("play", 0)
+		}
+		return "таймер запущен", nil, true
+	case "timer.pause":
+		a.sync.SetTimer("pause", 0)
+		return "таймер на паузе", nil, true
+	case "timer.reset":
+		a.sync.SetTimer("pause", 0)
+		return "таймер сброшен", nil, true
+	case "command.run":
+		if a.commands != nil {
+			a.commands.RunByName(value, message)
+		}
+		return "", nil, true
+	case "variable.set", "variable.inc", "variable.dec":
+		if a.commands != nil {
+			a.commands.ApplyVariable(action, value)
+		}
+		return "переменная обновлена", nil, true
+	case "timer.add":
+		seconds, _ := strconv.Atoi(strings.TrimSpace(value))
+		if seconds != 0 {
+			a.sync.AddTimer(seconds)
+		}
+		return "таймер изменён", nil, true
+	case "twitch.followage", "twitch.accountage", "twitch.uptime", "twitch.viewers", "twitch.title", "twitch.game", "twitch.followers", "twitch.subscribers", "twitch.chatters":
+		return a.Twitch(ctx, action, message.Author.ID), nil, true
+	case "points.balance", "points.top", "points.shop", "quotes.random":
+		return a.Twitch(ctx, action, message.Author.ID), nil, true
+	case "random":
+		options := strings.Split(value, "|")
+		clean := options[:0]
+		for _, item := range options {
+			if item = strings.TrimSpace(item); item != "" {
+				clean = append(clean, item)
+			}
+		}
+		if len(clean) == 0 {
+			return "", fmt.Errorf("нужно хотя бы одно значение"), true
+		}
+		return clean[rand.Intn(len(clean))], nil, true
+	}
+
+	return "", nil, false
 }
 
 func (a commandActioner) Clip(ctx context.Context) error {

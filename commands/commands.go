@@ -52,6 +52,11 @@ type Actioner interface {
 	Twitch(ctx context.Context, action, userID string) string
 }
 
+// AdvancedActioner — расширенные действия, которые не ломают старые реализации.
+type AdvancedActioner interface {
+	Perform(ctx context.Context, action, value string, message twitch.TwitchChatMessage) (string, error, bool)
+}
+
 type VariableResolver func(name string) string
 
 type Variable struct {
@@ -154,6 +159,33 @@ func (s *Service) List() []Command {
 	return list
 }
 
+func isAdvancedAction(action string) bool {
+	switch action {
+	case "points.add", "points.remove", "points.set", "ban", "unban", "delete", "announce", "shoutout",
+		"raid", "raid.cancel", "marker", "shield.on", "shield.off", "title.set", "game.set", "commercial",
+		"poll", "poll.end", "dice", "coinflip", "random", "quote.add", "points.redeem", "games.slots",
+		"games.wheel", "games.trivia", "games.duel", "games.accept", "music.current", "timer.start",
+		"timer.pause", "timer.reset", "timer.add":
+		return true
+	}
+
+	return false
+}
+
+func knownAction(action string) bool {
+	if isAdvancedAction(action) {
+		return true
+	}
+
+	switch action {
+	case "say", "points", "timeout", "wheel", "music", "clip", "lastmusic", "quotes.random",
+		"variable.set", "variable.inc", "variable.dec", "command.run":
+		return true
+	}
+
+	return strings.HasPrefix(action, "twitch.") || strings.HasPrefix(action, "points.")
+}
+
 func (s *Service) Upsert(command Command) (Command, error) {
 	command.Name = normalizeName(command.Name)
 
@@ -161,7 +193,7 @@ func (s *Service) Upsert(command Command) (Command, error) {
 		command.Action = "say"
 	}
 
-	if command.Action != "say" && command.Action != "points" && command.Action != "timeout" && command.Action != "wheel" && command.Action != "music" && command.Action != "clip" && command.Action != "lastmusic" && !strings.HasPrefix(command.Action, "twitch.") {
+	if !knownAction(command.Action) {
 		return Command{}, fmt.Errorf("неизвестное действие команды")
 	}
 
@@ -396,7 +428,42 @@ func (s *Service) expand(text string) string {
 }
 
 func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string) {
-	defer s.sendReply(command, message, response)
+	defer func() { s.sendReply(command, message, response) }()
+
+	switch command.Action {
+	case "variable.set":
+		s.setVariableAction(strings.TrimSpace(command.Response), false)
+		return
+	case "variable.inc", "variable.dec":
+		delta := 1
+		if command.Action == "variable.dec" {
+			delta = -1
+		}
+		s.setVariableAction(strings.TrimSpace(command.Response), true, delta)
+		return
+	case "command.run":
+		s.runByName(strings.TrimSpace(command.Response), message)
+		return
+	}
+
+	if advanced, ok := s.actioner.(AdvancedActioner); ok && isAdvancedAction(command.Action) {
+		if text, err, handled := advanced.Perform(context.Background(), command.Action, strings.TrimSpace(command.Response), message); handled {
+			if err != nil {
+				log.Printf("[Commands] %s failed: %v", command.Action, err)
+
+				return
+			}
+
+			if text != "" && s.writer != nil {
+				_ = s.writer.Say(s.expand(text))
+			}
+
+			command.Reply = ""
+			response = ""
+
+			return
+		}
+	}
 
 	if s.actioner != nil {
 		switch command.Action {
@@ -458,6 +525,88 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 		}
 	}
 
+}
+
+func (s *Service) setVariableAction(raw string, increment bool, delta ...int) {
+	name, value, _ := strings.Cut(raw, "=")
+	name = strings.TrimSpace(strings.TrimPrefix(name, "$("))
+	name = strings.TrimSuffix(name, ")")
+	if name == "" {
+		return
+	}
+
+	s.mu.Lock()
+	variable, ok := s.custom[strings.ToLower(name)]
+	if !ok {
+		variable = Variable{ID: name, Name: name}
+	}
+
+	if increment {
+		step := 1
+		if len(delta) > 0 {
+			step = delta[0]
+		}
+		current := 0
+		if parsed, err := strconv.Atoi(strings.TrimSpace(variable.Value)); err == nil {
+			current = parsed
+		}
+		variable.Value = strconv.Itoa(current + step)
+	} else {
+		variable.Value = strings.TrimSpace(value)
+	}
+
+	s.custom[strings.ToLower(name)] = variable
+	s.mu.Unlock()
+	s.persistVariables()
+}
+
+func (s *Service) RunByName(name string, message twitch.TwitchChatMessage) bool {
+	s.mu.Lock()
+	var target *Command
+	for _, command := range s.commands {
+		if command.Name == normalizeName(strings.TrimPrefix(strings.TrimSpace(name), "!")) {
+			target = command
+
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if target == nil {
+		return false
+	}
+
+	return s.Run(target.ID, message)
+}
+
+func (s *Service) ApplyVariable(action, raw string) {
+	switch action {
+	case "variable.inc":
+		s.setVariableAction(raw, true, 1)
+	case "variable.dec":
+		s.setVariableAction(raw, true, -1)
+	default:
+		s.setVariableAction(raw, false)
+	}
+}
+
+func (s *Service) runByName(raw string, message twitch.TwitchChatMessage) {
+	name := normalizeName(strings.TrimPrefix(strings.TrimSpace(raw), "!"))
+
+	s.mu.Lock()
+	var target *Command
+	for _, command := range s.commands {
+		if command.Name == name {
+			target = command
+
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if target != nil {
+		s.Run(target.ID, message)
+	}
 }
 
 func (s *Service) sendReply(command Command, message twitch.TwitchChatMessage, response string) {
