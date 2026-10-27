@@ -52,6 +52,13 @@ type Actioner interface {
 
 type VariableResolver func(name string) string
 
+type Variable struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Action string `json:"action"`
+}
+
 type Service struct {
 	mu        sync.Mutex
 	commands  map[string]*Command
@@ -60,6 +67,8 @@ type Service struct {
 	writer    chat.Writer
 	actioner  Actioner
 	variables VariableResolver
+	custom    map[string]Variable
+	actions   map[string]string
 	db        *sql.DB
 	now       func() time.Time
 }
@@ -82,12 +91,16 @@ func New(writer chat.Writer, db *sql.DB) *Service {
 	service := &Service{
 		commands:  make(map[string]*Command),
 		cooldowns: make(map[string]time.Time),
+		custom:    make(map[string]Variable),
+		actions:   make(map[string]string),
 		writer:    writer,
 		db:        db,
 		now:       time.Now,
 	}
 
 	service.load()
+	service.loadActions()
+	service.loadVariables()
 
 	return service
 }
@@ -166,9 +179,11 @@ func (s *Service) Upsert(command Command) (Command, error) {
 
 	s.mu.Lock()
 	s.commands[command.Name] = &command
+	s.actions[command.ID] = command.Action
 	s.mu.Unlock()
 
 	s.persist(command)
+	s.persistActions()
 
 	return command, nil
 }
@@ -184,6 +199,7 @@ func (s *Service) SetCommandEnabled(id string, enabled bool) (Command, bool) {
 
 		command.Enabled = enabled
 		snapshot := *command
+		s.actions[snapshot.ID] = snapshot.Action
 		s.persist(snapshot)
 
 		return snapshot, true
@@ -199,6 +215,8 @@ func (s *Service) Delete(id string) bool {
 	for name, command := range s.commands {
 		if command.ID == id {
 			delete(s.commands, name)
+			delete(s.actions, command.ID)
+			s.persistActions()
 
 			if s.db != nil {
 				_, _ = s.db.ExecContext(context.Background(), `DELETE FROM command WHERE id = $1`, id)
@@ -212,6 +230,57 @@ func (s *Service) Delete(id string) bool {
 }
 
 /* ── Обработка чата ───────────────────────────────────────────────── */
+
+func (s *Service) Variables() []Variable {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := make([]Variable, 0, len(s.custom))
+
+	for _, variable := range s.custom {
+		result = append(result, variable)
+	}
+
+	return result
+}
+
+func (s *Service) SaveVariable(variable Variable) (Variable, error) {
+	variable.Name = strings.TrimSpace(strings.TrimPrefix(variable.Name, "$("))
+	variable.Name = strings.TrimSuffix(variable.Name, ")")
+	variable.Name = strings.ToLower(strings.TrimSpace(variable.Name))
+
+	if variable.Name == "" {
+		return Variable{}, fmt.Errorf("имя переменной обязательно")
+	}
+
+	if variable.ID == "" {
+		variable.ID = fmt.Sprintf("var-%d", time.Now().UnixNano())
+	}
+
+	s.mu.Lock()
+	s.custom[variable.Name] = variable
+	s.mu.Unlock()
+
+	s.persistVariables()
+
+	return variable, nil
+}
+
+func (s *Service) DeleteVariable(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for name, variable := range s.custom {
+		if variable.ID == id {
+			delete(s.custom, name)
+			s.persistVariables()
+
+			return true
+		}
+	}
+
+	return false
+}
 
 // HandleMessage вызывается из шины чата.
 func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
@@ -284,18 +353,36 @@ func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
 var variablePattern = regexp.MustCompile(`\$\(([a-z]+)\)`)
 
 func (s *Service) expand(text string) string {
-	if text == "" || s.variables == nil {
+	if text == "" {
 		return text
 	}
 
 	return variablePattern.ReplaceAllStringFunc(text, func(match string) string {
 		name := strings.TrimSuffix(strings.TrimPrefix(match, "$("), ")")
-		value := s.variables(name)
-		if value == "" {
-			return match
+
+		s.mu.Lock()
+		variable, ok := s.custom[strings.ToLower(name)]
+		s.mu.Unlock()
+
+		if ok {
+			if variable.Action != "" && s.variables != nil {
+				if value := s.variables(variable.Action); value != "" {
+					return value
+				}
+			}
+
+			if variable.Value != "" {
+				return s.expand(variable.Value)
+			}
 		}
 
-		return value
+		if s.variables != nil {
+			if value := s.variables(name); value != "" {
+				return value
+			}
+		}
+
+		return match
 	})
 }
 
@@ -428,6 +515,67 @@ func render(template string, message twitch.TwitchChatMessage, counter int) stri
 
 /* ── Персистентность ──────────────────────────────────────────────── */
 
+func (s *Service) loadActions() {
+	if s.db == nil {
+		return
+	}
+
+	var raw []byte
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'command_actions'`).Scan(&raw); err != nil {
+		return
+	}
+
+	_ = json.Unmarshal(raw, &s.actions)
+}
+
+func (s *Service) persistActions() {
+	if s.db == nil {
+		return
+	}
+
+	raw, err := json.Marshal(s.actions)
+	if err != nil {
+		return
+	}
+
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_actions', $1)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+}
+
+func (s *Service) loadVariables() {
+	if s.db == nil {
+		return
+	}
+
+	var raw []byte
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'command_variables'`).Scan(&raw); err != nil {
+		return
+	}
+
+	var list []Variable
+	if json.Unmarshal(raw, &list) != nil {
+		return
+	}
+
+	for _, variable := range list {
+		s.custom[variable.Name] = variable
+	}
+}
+
+func (s *Service) persistVariables() {
+	if s.db == nil {
+		return
+	}
+
+	raw, err := json.Marshal(s.Variables())
+	if err != nil {
+		return
+	}
+
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_variables', $1)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+}
+
 func (s *Service) persist(command Command) {
 	if s.db == nil {
 		return
@@ -506,6 +654,9 @@ func (s *Service) load() {
 
 		_ = json.Unmarshal([]byte(aliases), &command.Aliases)
 		command.Action = "say"
+		if action := s.actions[command.ID]; action != "" {
+			command.Action = action
+		}
 		s.commands[command.Name] = &command
 	}
 }
@@ -517,6 +668,43 @@ type Deps interface {
 }
 
 func RegisterRoutes(srv Deps, service *Service) {
+	srv.ServeEndpoint("/rgg-sync/command-variables", func(response http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodGet:
+			writeJSON(response, http.StatusOK, map[string]any{"variables": service.Variables()})
+		case http.MethodPost:
+			var variable Variable
+			if err := json.NewDecoder(request.Body).Decode(&variable); err != nil {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+
+				return
+			}
+			saved, err := service.SaveVariable(variable)
+			if err != nil {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": err.Error()})
+
+				return
+			}
+			writeJSON(response, http.StatusOK, saved)
+		default:
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	srv.ServeEndpoint("/rgg-sync/command-variables/{id}", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodDelete {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+		if !service.DeleteVariable(request.PathValue("id")) {
+			http.Error(response, "not found", http.StatusNotFound)
+
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
+
 	srv.ServeEndpoint("/rgg-sync/commands", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, map[string]any{"commands": service.List()})
