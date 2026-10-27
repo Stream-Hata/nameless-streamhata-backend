@@ -531,6 +531,24 @@ func (s *Scheduler) processMessage(message twitch.TwitchChatMessage) {
 		return
 	}
 
+	if strings.HasPrefix(text, "!") {
+		if action, _, ok := s.triggers.Match(text); ok {
+			if action == "jury.yea" {
+				s.service.Vote(message.Author.ID, true)
+
+				return
+			}
+
+			if action == "jury.nei" {
+				s.service.Vote(message.Author.ID, false)
+
+				return
+			}
+		}
+
+		return
+	}
+
 	if action, _, ok := s.triggers.Match(text); ok {
 		if action == "jury.yea" {
 			s.service.Vote(message.Author.ID, true)
