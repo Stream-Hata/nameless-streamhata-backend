@@ -327,7 +327,7 @@ func (s *Service) execute(ctx context.Context, mapping Mapping, event redemption
 		if s.commands != nil {
 			message := twitch.TwitchChatMessage{
 				Author: twitch.ChatUser{ID: userID, Login: login, DisplayName: name},
-				Text:   mapping.Payload,
+				Text:   event.UserInput,
 				SentAt: event.Status,
 			}
 			if !s.commands.Run(mapping.Payload, message) {
@@ -470,6 +470,10 @@ func RegisterRoutes(srv Deps, service *Service) {
 				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 
 				return
+			}
+
+			if strings.TrimSpace(body.Prompt) == "" {
+				body.Prompt = body.Title
 			}
 
 			if strings.TrimSpace(body.Title) == "" || body.Cost < 1 {

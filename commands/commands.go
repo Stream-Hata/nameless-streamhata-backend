@@ -406,9 +406,9 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 
 			return
 		case "music":
-			url := strings.TrimSpace(command.Response)
+			url := strings.TrimSpace(message.Text)
 			if url == "" {
-				url = strings.TrimSpace(message.Text)
+				url = strings.TrimSpace(command.Response)
 			}
 			_ = s.actioner.AddMusic(context.Background(), url, message.Author.Login)
 
