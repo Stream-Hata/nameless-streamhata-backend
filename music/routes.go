@@ -25,6 +25,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 	srv.ServeEndpoint("/rgg-sync/music", func(response http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
+			response.Header().Set("Cache-Control", "no-store")
 			writeJSON(response, http.StatusOK, listResponse{
 				Tracks:  service.List(),
 				Stats:   service.Stats(),
