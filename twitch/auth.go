@@ -120,7 +120,10 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 			"moderator:manage:shield_mode "+
 			"bits:read "+
 			"clips:edit "+
-			"user:read:chat")
+			"chat:read "+
+			"chat:edit "+
+			"user:read:chat "+
+			"user:write:chat")
 
 		http.SetCookie(w, &http.Cookie{
 			Name:     "e-hub-state",
