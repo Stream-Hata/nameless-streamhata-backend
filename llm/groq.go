@@ -174,7 +174,7 @@ func (g *Groq) Classify(ctx context.Context, message string) (Classification, er
 		return Classification{}, nil
 	}
 
-	content, err := g.complete(ctx, 0, 32, classifierPrompt, []chatMessage{
+	content, err := g.complete(ctx, 0, 512, classifierPrompt, []chatMessage{
 		{Role: "user", Content: message},
 	})
 	if err != nil {
@@ -269,7 +269,7 @@ func (g *Groq) ClassifyToxicity(ctx context.Context, message string) (Toxicity, 
 		return Toxicity{}, nil
 	}
 
-	content, err := g.complete(ctx, 0, 48, toxicityPrompt, []chatMessage{{Role: "user", Content: message}})
+	content, err := g.complete(ctx, 0, 256, toxicityPrompt, []chatMessage{{Role: "user", Content: message}})
 	if err != nil {
 		return Toxicity{}, err
 	}

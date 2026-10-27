@@ -237,8 +237,35 @@ func ParsePrivmsg(line string, broadcaster twitch.ChatUser) (twitch.TwitchChatMe
 		},
 		Text:   text,
 		SentAt: sentAt.Format(time.RFC3339Nano),
+		Color:  tags["color"],
 		Emotes: ParseEmotes(tags["emotes"], text),
+		Badges: ParseBadges(tags["badges"]),
 	}, true
+}
+
+// ParseBadges разбирает IRC-тег badges="set/version,set/version".
+func ParseBadges(raw string) []twitch.ChatBadge {
+	if raw == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	badges := make([]twitch.ChatBadge, 0, len(parts))
+
+	for _, part := range parts {
+		setID, version, ok := strings.Cut(strings.TrimSpace(part), "/")
+		if !ok || setID == "" || version == "" {
+			continue
+		}
+
+		badges = append(badges, twitch.ChatBadge{SetID: setID, Version: version})
+	}
+
+	if len(badges) == 0 {
+		return nil
+	}
+
+	return badges
 }
 
 // ParseEmotes разбирает IRC-тег emotes="id:start-end,..." с учётом Unicode

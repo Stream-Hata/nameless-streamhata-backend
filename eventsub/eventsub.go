@@ -255,6 +255,13 @@ type chatEvent struct {
 	ChatterUserName  string `json:"chatter_user_name"`
 
 	MessageID string `json:"message_id"`
+	Color     string `json:"color"`
+
+	Badges []struct {
+		SetID string `json:"set_id"`
+		ID    string `json:"id"`
+		Info  string `json:"info"`
+	} `json:"badges"`
 
 	Message struct {
 		Text      string `json:"text"`
@@ -298,8 +305,32 @@ func mapNotification(raw json.RawMessage, broadcaster twitch.ChatUser) (twitch.T
 		},
 		Text:   event.Message.Text,
 		SentAt: sentAt,
+		Color:  event.Color,
 		Emotes: mapFragments(event.Message.Fragments),
+		Badges: mapBadges(event.Badges),
 	}, true
+}
+
+func mapBadges(badges []struct {
+	SetID string `json:"set_id"`
+	ID    string `json:"id"`
+	Info  string `json:"info"`
+}) []twitch.ChatBadge {
+	result := make([]twitch.ChatBadge, 0, len(badges))
+
+	for _, badge := range badges {
+		if badge.SetID == "" || badge.ID == "" {
+			continue
+		}
+
+		result = append(result, twitch.ChatBadge{SetID: badge.SetID, Version: badge.ID, Info: badge.Info})
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+
+	return result
 }
 
 // mapFragments считает позиции эмотов по фрагментам EventSub (Unicode-индексы).

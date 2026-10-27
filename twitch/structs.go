@@ -116,6 +116,12 @@ type ChatEmote struct {
 	Provider string `json:"provider"`
 }
 
+type ChatBadge struct {
+	SetID   string `json:"set_id"`
+	Version string `json:"version"`
+	Info    string `json:"info,omitempty"`
+}
+
 type TwitchChatMessage struct {
 	MessageID string `json:"message_id"`
 
@@ -124,5 +130,7 @@ type TwitchChatMessage struct {
 
 	Text   string      `json:"text"`
 	SentAt string      `json:"sent_at"`
+	Color  string      `json:"color,omitempty"`
 	Emotes []ChatEmote `json:"emotes,omitempty"`
+	Badges []ChatBadge `json:"badges,omitempty"`
 }
