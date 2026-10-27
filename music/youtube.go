@@ -48,6 +48,28 @@ func ExtractVideoID(text string) (string, bool) {
 	return match[1], true
 }
 
+var mediaPattern = regexp.MustCompile(`https?://[^\s<>"']+\.(?:mp3|m4a|aac|ogg|wav|flac|mp4|webm|mov|mkv)(?:\?[^\s<>"']*)?`)
+
+func ExtractLink(text string) (string, string, bool) {
+	if videoID, ok := ExtractVideoID(text); ok {
+		return "https://www.youtube.com/watch?v=" + videoID, "youtube", true
+	}
+
+	match := mediaPattern.FindString(text)
+	if match == "" {
+		return "", "", false
+	}
+
+	lower := strings.ToLower(match)
+
+	switch {
+	case strings.Contains(lower, ".mp4"), strings.Contains(lower, ".webm"), strings.Contains(lower, ".mov"), strings.Contains(lower, ".mkv"):
+		return match, "video", true
+	default:
+		return match, "audio", true
+	}
+}
+
 // VideoMeta — метаданные трека, которые мы добываем без API-ключей.
 type VideoMeta struct {
 	VideoID         string `json:"videoId"`

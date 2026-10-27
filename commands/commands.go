@@ -45,6 +45,8 @@ type Actioner interface {
 	AwardPoints(userID, login, displayName string, amount int, reason string) error
 	TimeoutUser(ctx context.Context, userID string, seconds int, reason string) error
 	WheelEntry(userID, login, displayName, title string, bet int) error
+	AddMusic(ctx context.Context, url, addedBy string) error
+	Clip(ctx context.Context) error
 }
 
 type Service struct {
@@ -130,7 +132,7 @@ func (s *Service) Upsert(command Command) (Command, error) {
 		command.Action = "say"
 	}
 
-	if command.Action != "say" && command.Action != "points" && command.Action != "timeout" && command.Action != "wheel" {
+	if command.Action != "say" && command.Action != "points" && command.Action != "timeout" && command.Action != "wheel" && command.Action != "music" && command.Action != "clip" {
 		return Command{}, fmt.Errorf("неизвестное действие команды")
 	}
 
@@ -285,6 +287,18 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 			if seconds, err := strconv.Atoi(strings.TrimSpace(command.Response)); err == nil {
 				_ = s.actioner.TimeoutUser(context.Background(), message.Author.ID, seconds, "command: "+command.Name)
 			}
+
+			return
+		case "music":
+			url := strings.TrimSpace(command.Response)
+			if url == "" {
+				url = strings.TrimSpace(message.Text)
+			}
+			_ = s.actioner.AddMusic(context.Background(), url, message.Author.Login)
+
+			return
+		case "clip":
+			_ = s.actioner.Clip(context.Background())
 
 			return
 		case "wheel":

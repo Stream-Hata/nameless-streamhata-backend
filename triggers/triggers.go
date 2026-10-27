@@ -35,6 +35,7 @@ func defaults() []Trigger {
 		{Action: "jury.yea", Command: "!yea", Aliases: []string{"!ya"}, Enabled: true, Description: "Голос жюри: за"},
 		{Action: "jury.nei", Command: "!nei", Aliases: []string{"!no"}, Enabled: true, Description: "Голос жюри: против"},
 		{Action: "clips.clip", Command: "!clip", Aliases: nil, Enabled: true, Description: "Создать клип"},
+		{Action: "music.add", Command: "!music", Aliases: []string{"!музыка"}, Enabled: true, Description: "Добавить музыку"},
 	}
 }
 
@@ -132,6 +133,19 @@ func (s *Service) Update(list []Trigger) ([]Trigger, error) {
 }
 
 // Match определяет действие по имени команды и возвращает аргументы.
+func (s *Service) CommandFor(action string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, item := range s.list {
+		if item.Action == action && item.Enabled {
+			return item.Command
+		}
+	}
+
+	return ""
+}
+
 func (s *Service) Match(text string) (string, []string, bool) {
 	fields := strings.Fields(text)
 

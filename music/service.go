@@ -2,12 +2,15 @@ package music
 
 import (
 	"context"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +23,7 @@ import (
 // Track — трек, найденный в чате или добавленный вручную.
 type Track struct {
 	VideoID         string    `json:"videoId"`
+	Kind            string    `json:"kind,omitempty"`
 	URL             string    `json:"url"`
 	Title           string    `json:"title"`
 	Author          string    `json:"author"`
@@ -118,21 +122,84 @@ func (s *Service) HandleChatMessage(ctx context.Context, message twitch.TwitchCh
 		return
 	}
 
-	videoID, ok := ExtractVideoID(message.Text)
-
-	if !ok {
-		return
-	}
-
 	addedBy := message.Author.DisplayName
 
 	if addedBy == "" {
 		addedBy = message.Author.Login
 	}
 
+	videoID, ok := ExtractVideoID(message.Text)
+
+	if !ok {
+		s.addMediaFromText(message.Text, addedBy)
+
+		return
+	}
+
 	if _, err := s.Add(ctx, videoID, "https://www.youtube.com/watch?v="+videoID, addedBy); err != nil {
 		log.Printf("[Music] failed to add %s: %v", videoID, err)
 	}
+
+	return
+}
+
+func (s *Service) addMediaFromText(text, addedBy string) {
+	url, kind, ok := ExtractLink(text)
+	if !ok || kind == "youtube" {
+		return
+	}
+
+	if _, err := s.AddMedia(url, kind, addedBy); err != nil {
+		log.Printf("[Music] failed to add media: %v", err)
+	}
+}
+
+func (s *Service) AddMedia(url, kind, addedBy string) (*Track, error) {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return nil, errors.New("music: empty media url")
+	}
+
+	sum := sha1.Sum([]byte(url))
+	videoID := "media-" + hex.EncodeToString(sum[:])[:16]
+	title := path.Base(strings.Split(url, "?")[0])
+	if title == "" || title == "." || title == "/" {
+		title = url
+	}
+
+	now := time.Now().UTC()
+
+	s.mu.Lock()
+	if track, exists := s.tracks[videoID]; exists {
+		track.TimesAdded++
+		track.LastAddedAt = now
+		snapshot := *track
+		s.mu.Unlock()
+		s.persist(snapshot)
+
+		return &snapshot, nil
+	}
+
+	track := &Track{
+		VideoID:         videoID,
+		Kind:            kind,
+		URL:             url,
+		Title:           title,
+		Author:          "media",
+		DurationSeconds: 0,
+		Thumbnail:       "",
+		Links:           []string{url},
+		AddedBy:         addedBy,
+		FirstAddedAt:    now,
+		LastAddedAt:     now,
+		TimesAdded:      1,
+	}
+	s.tracks[videoID] = track
+	snapshot := *track
+	s.mu.Unlock()
+	s.persist(snapshot)
+
+	return &snapshot, nil
 }
 
 // SetCurrent запоминает трек, который сейчас играет в оверлее.

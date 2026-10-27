@@ -154,10 +154,6 @@ func main() {
 	triggers.RegisterRoutes(srv, triggersService)
 
 	musicService := music.NewService(musicDB)
-	chatService.Subscribe(func(message twitch.TwitchChatMessage) {
-		go musicService.HandleChatMessage(ctx, message)
-	})
-
 	music.RegisterRoutes(srv, musicService)
 	chat.RegisterRoutes(srv, chatService)
 
@@ -245,7 +241,7 @@ func main() {
 	quotesService.SetTriggers(triggersService)
 	quotes.RegisterRoutes(srv, quotesService)
 
-	commandsService.SetActioner(commandActioner{points: pointsService, games: gamesService, chat: chatRuntime})
+	commandsService.SetActioner(commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService})
 
 	redemptionsService := redemptions.New(pointsService, chatRuntime, musicDB)
 	redemptionsService.SetWheelEntry(gamesService.EnterWheelWithCost)
@@ -375,6 +371,23 @@ func main() {
 	// Конвейер чата: активность таймеров, команды, модерация, баллы, игры.
 	chatService.Subscribe(func(message twitch.TwitchChatMessage) {
 		timersService.NoteChatActivity()
+
+		if action, _, ok := triggersService.Match(message.Text); ok && action == "music.add" {
+			go musicService.HandleChatMessage(ctx, message)
+
+			return
+		}
+
+		if link, _, ok := music.ExtractLink(message.Text); ok {
+			command := triggersService.CommandFor("music.add")
+			if command == "" {
+				command = "!music"
+			}
+
+			go func() {
+				_ = chatRuntime.Say(fmt.Sprintf("Чтобы добавить музыку, отправь: %s %s", command, link))
+			}()
+		}
 
 		switch strings.ToLower(strings.TrimSpace(message.Text)) {
 		case "!np", "!nowplaying", "!сейчас":
@@ -508,6 +521,7 @@ type commandActioner struct {
 	points *points.Service
 	games  *games.Service
 	chat   *chatruntime.Runtime
+	music  *music.Service
 }
 
 func (a commandActioner) AwardPoints(userID, login, displayName string, amount int, reason string) error {
@@ -522,4 +536,29 @@ func (a commandActioner) TimeoutUser(ctx context.Context, userID string, seconds
 
 func (a commandActioner) WheelEntry(userID, login, displayName, title string, bet int) error {
 	return a.games.EnterWheelWithCost(userID, login, displayName, title, false, bet)
+}
+
+func (a commandActioner) AddMusic(ctx context.Context, url, addedBy string) error {
+	if videoID, ok := music.ExtractVideoID(url); ok {
+		_, err := a.music.Add(ctx, videoID, "https://www.youtube.com/watch?v="+videoID, addedBy)
+
+		return err
+	}
+
+	if link, kind, ok := music.ExtractLink(url); ok {
+		_, err := a.music.AddMedia(link, kind, addedBy)
+
+		return err
+	}
+
+	return nil
+}
+
+func (a commandActioner) Clip(ctx context.Context) error {
+	url, err := a.chat.CreateClip(ctx)
+	if err != nil {
+		return err
+	}
+
+	return a.chat.Say("Клип: " + url)
 }
