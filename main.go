@@ -433,16 +433,16 @@ func main() {
 
 		if action, _, ok := triggersService.Match(message.Text); ok && action == "clips.clip" {
 			go func() {
-				editURL, err := chatRuntime.CreateClip(ctx)
+				clip, err := chatRuntime.CreateClipInfo(ctx)
 
-				if err != nil || editURL == "" {
+				if err != nil || clip.URL == "" {
 					log.Printf("[Clips] create failed: %v", err)
 					_ = chatRuntime.Say("@" + message.Author.Login + ", не удалось создать клип")
 
 					return
 				}
 
-				_ = chatRuntime.Say("@" + message.Author.Login + ", Клип: " + editURL)
+				_ = chatRuntime.Say("@" + message.Author.Login + ", Клип: " + clip.URL)
 			}()
 		}
 		go ttsService.HandleMessage(message)
@@ -668,10 +668,10 @@ func (a commandActioner) Twitch(ctx context.Context, action, userID string) stri
 }
 
 func (a commandActioner) Clip(ctx context.Context) error {
-	url, err := a.chat.CreateClip(ctx)
+	clip, err := a.chat.CreateClipInfo(ctx)
 	if err != nil {
 		return err
 	}
 
-	return a.chat.Say("Клип: " + url)
+	return a.chat.Say("Клип: " + clip.URL)
 }

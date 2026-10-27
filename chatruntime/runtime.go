@@ -242,14 +242,20 @@ func (r *Runtime) DeleteMessage(ctx context.Context, messageID string) error {
 }
 
 // CreateClip создаёт клип текущего стрима и возвращает ссылку на редактирование.
-func (r *Runtime) CreateClip(ctx context.Context) (string, error) {
+type ClipInfo struct {
+	ID      string
+	EditURL string
+	URL     string
+}
+
+func (r *Runtime) CreateClipInfo(ctx context.Context) (ClipInfo, error) {
 	r.mu.Lock()
 	token := r.activeToken
 	broadcasterID := r.broadcaster.ID
 	r.mu.Unlock()
 
 	if token == "" || broadcasterID == "" {
-		return "", errors.New("chat: not connected")
+		return ClipInfo{}, errors.New("chat: not connected")
 	}
 
 	endpoint := fmt.Sprintf(
@@ -259,7 +265,7 @@ func (r *Runtime) CreateClip(ctx context.Context) (string, error) {
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
-		return "", err
+		return ClipInfo{}, err
 	}
 
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -267,7 +273,7 @@ func (r *Runtime) CreateClip(ctx context.Context) (string, error) {
 
 	response, err := r.http.Do(request)
 	if err != nil {
-		return "", err
+		return ClipInfo{}, err
 	}
 
 	defer func() {
@@ -275,24 +281,36 @@ func (r *Runtime) CreateClip(ctx context.Context) (string, error) {
 	}()
 
 	if response.StatusCode != http.StatusAccepted && response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("clips returned %d", response.StatusCode)
+		return ClipInfo{}, fmt.Errorf("clips returned %d", response.StatusCode)
 	}
 
 	var payload struct {
 		Data []struct {
+			ID      string `json:"id"`
 			EditURL string `json:"edit_url"`
 		} `json:"data"`
 	}
 
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		return "", err
+		return ClipInfo{}, err
 	}
 
 	if len(payload.Data) == 0 {
-		return "", errors.New("clips: empty response")
+		return ClipInfo{}, errors.New("clips: empty response")
 	}
 
-	return payload.Data[0].EditURL, nil
+	clip := payload.Data[0]
+
+	return ClipInfo{ID: clip.ID, EditURL: clip.EditURL, URL: "https://clips.twitch.tv/" + clip.ID}, nil
+}
+
+func (r *Runtime) CreateClip(ctx context.Context) (string, error) {
+	clip, err := r.CreateClipInfo(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	return clip.EditURL, nil
 }
 
 // FollowersCount возвращает число фолловеров.
