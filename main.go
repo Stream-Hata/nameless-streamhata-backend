@@ -306,7 +306,11 @@ func main() {
 		case "points.shop":
 			return pointsService.ShopText()
 		case "twitch.followage", "twitch.accountage", "twitch.uptime", "twitch.viewers", "twitch.title", "twitch.game", "twitch.followers", "twitch.subscribers", "twitch.chatters":
-			return actioner.Twitch(context.Background(), name, message.Author.ID)
+			value := actioner.Twitch(context.Background(), name, message.Author.ID)
+			value = strings.TrimPrefix(value, "Фолловер с ")
+			value = strings.TrimPrefix(value, "Аккаунт создан ")
+
+			return value
 		}
 
 		return ""
@@ -888,12 +892,15 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 			total += roll
 		}
 		a.sync.RollDice(formula, total, rolls, message.Author.DisplayName)
+		a.sync.PublishGame("dice", formula, strconv.Itoa(total), message.Author.DisplayName)
 		return "@" + message.Author.Login + " бросил кубик " + formula + " и ему выпало " + strconv.Itoa(total), nil, true
 	case "coinflip":
+		result := "орёл"
 		if rand.Intn(2) == 0 {
-			return "орёл", nil, true
+			result = "решка"
 		}
-		return "решка", nil, true
+		a.sync.PublishGame("coin", "монетка", result, message.Author.DisplayName)
+		return "@" + message.Author.Login + " бросил монетку и ему выпало " + result, nil, true
 	case "quote.add":
 		quote, err := a.quotes.Add(strings.TrimSpace(value), message.Author.DisplayName, message.Author.Login)
 		if err != nil {
@@ -977,7 +984,9 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 		if len(clean) == 0 {
 			return "", fmt.Errorf("нужно хотя бы одно значение"), true
 		}
-		return clean[rand.Intn(len(clean))], nil, true
+		chosen := clean[rand.Intn(len(clean))]
+		a.sync.PublishGame("random", value, chosen, message.Author.DisplayName)
+		return "@" + message.Author.Login + " случайный выбор: " + chosen, nil, true
 	}
 
 	return "", nil, false

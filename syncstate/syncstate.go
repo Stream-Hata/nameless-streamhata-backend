@@ -39,12 +39,21 @@ type DiceState struct {
 	RolledAt time.Time `json:"rolledAt"`
 }
 
+type GameState struct {
+	Kind     string    `json:"kind"`
+	Label    string    `json:"label"`
+	Result   string    `json:"result"`
+	Viewer   string    `json:"viewer"`
+	RolledAt time.Time `json:"rolledAt"`
+}
+
 // AppState — форма состояния, которую ждёт фронт (AppBackendState).
 type AppState struct {
 	Mode        string      `json:"mode"`
 	TimerState  TimerState  `json:"timerState"`
 	HotbarState HotbarState `json:"hotbarState"`
 	DiceState   DiceState   `json:"diceState"`
+	GameState   GameState   `json:"gameState"`
 }
 
 // Patch — частичное обновление (поля-указатели = «не менять»).
@@ -82,6 +91,9 @@ func New() *Service {
 			DiceState: DiceState{
 				Formula: "1d6",
 				Rolls:   []int{},
+			},
+			GameState: GameState{
+				Kind: "dice",
 			},
 		},
 		lastTimerUpdate: time.Now(),
@@ -198,6 +210,15 @@ func RegisterRoutes(srv Deps, service *Service) {
 
 	srv.ServeEndpoint("/rgg-sync", handler)
 	srv.ServeEndpoint("/rgg-sync/", handler)
+	srv.ServeEndpoint("/rgg-sync/game", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		writeJSON(response, http.StatusOK, service.GetGame())
+	})
 	srv.ServeEndpoint("/rgg-sync/dice", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
@@ -230,6 +251,30 @@ func (s *Service) RollDice(formula string, result int, rolls []int, viewer strin
 	}
 
 	return s.state.DiceState
+}
+
+// PublishGame stores the latest game result for the game overlays.
+func (s *Service) PublishGame(kind, label, result, viewer string) GameState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.state.GameState = GameState{
+		Kind:     kind,
+		Label:    label,
+		Result:   result,
+		Viewer:   viewer,
+		RolledAt: time.Now(),
+	}
+
+	return s.state.GameState
+}
+
+// GetGame returns the latest game result.
+func (s *Service) GetGame() GameState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.state.GameState
 }
 
 // GetDice returns the latest dice result.

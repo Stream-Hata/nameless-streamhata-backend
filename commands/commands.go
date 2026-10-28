@@ -391,15 +391,22 @@ func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
 	return false
 }
 
-var variablePattern = regexp.MustCompile(`\$\(([a-z]+)\)`)
+var variablePattern = regexp.MustCompile(`\$\(([a-zA-Z0-9_]+)\)|\$\{([a-zA-Z0-9_]+)\}`)
 
 func (s *Service) expand(text string, message twitch.TwitchChatMessage) string {
-	if text == "" {
+	return s.expandDepth(text, message, 0)
+}
+
+func (s *Service) expandDepth(text string, message twitch.TwitchChatMessage, depth int) string {
+	if text == "" || depth > 10 {
 		return text
 	}
 
 	return variablePattern.ReplaceAllStringFunc(text, func(match string) string {
 		name := strings.TrimSuffix(strings.TrimPrefix(match, "$("), ")")
+		if strings.HasPrefix(match, "${") {
+			name = strings.TrimSuffix(strings.TrimPrefix(match, "${"), "}")
+		}
 
 		s.mu.Lock()
 		variable, ok := s.custom[strings.ToLower(name)]
@@ -413,7 +420,7 @@ func (s *Service) expand(text string, message twitch.TwitchChatMessage) string {
 			}
 
 			if variable.Value != "" {
-				return s.expand(variable.Value, message)
+				return s.expandDepth(variable.Value, message, depth+1)
 			}
 		}
 

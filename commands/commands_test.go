@@ -139,3 +139,30 @@ func TestTestEndpointRenders(t *testing.T) {
 		t.Fatalf("unexpected test render: %q (ok=%v)", text, ok)
 	}
 }
+
+func TestExpandBracedAndSelfReferencingVariable(t *testing.T) {
+	service := New(nil, nil)
+	service.custom["fdate"] = Variable{Name: "fdate", Action: "twitch.followage", Value: "${fdate}"}
+	service.variables = func(name, value string, message twitch.TwitchChatMessage) string {
+		if name == "twitch.followage" {
+			return "12.03.2024"
+		}
+
+		return ""
+	}
+
+	text := service.expand("ты зафолловился ${fdate}", message("1", "Иван", "!follow"))
+	if text != "ты зафолловился 12.03.2024" {
+		t.Fatalf("unexpected expansion: %q", text)
+	}
+}
+
+func TestExpandSelfReferenceDoesNotLoop(t *testing.T) {
+	service := New(nil, nil)
+	service.custom["loop"] = Variable{Name: "loop", Value: "${loop}"}
+
+	text := service.expand("${loop}", message("1", "Иван", "!loop"))
+	if !strings.Contains(text, "loop") {
+		t.Fatalf("self reference must not disappear: %q", text)
+	}
+}
