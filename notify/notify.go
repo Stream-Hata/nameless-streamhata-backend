@@ -4,6 +4,7 @@ package notify
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"github.com/p7x-dev/nameless-streamhata-backend/netcfg"
@@ -41,13 +42,18 @@ type Service struct {
 	mu       sync.Mutex
 	settings Settings
 	http     *http.Client
+	db       *sql.DB
 }
 
-func New() *Service {
-	return &Service{
+func New(db *sql.DB) *Service {
+	service := &Service{
 		settings: defaultSettings(),
 		http:     netcfg.NewHTTPClient(15 * time.Second),
+		db:       db,
 	}
+	service.load()
+
+	return service
 }
 
 /* ── Контракт integrations.Component ──────────────────────────────── */
@@ -110,11 +116,41 @@ func (s *Service) GetSettings() Settings {
 
 func (s *Service) SetSettings(settings Settings) Settings {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.settings = settings
+	s.mu.Unlock()
+	s.persist()
 
-	return s.settings
+	return s.GetSettings()
+}
+
+func (s *Service) load() {
+	if s.db == nil {
+		return
+	}
+
+	var raw []byte
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'notify_settings'`).Scan(&raw); err != nil {
+		return
+	}
+
+	var settings Settings
+	if json.Unmarshal(raw, &settings) == nil {
+		s.settings = settings
+	}
+}
+
+func (s *Service) persist() {
+	if s.db == nil {
+		return
+	}
+
+	raw, err := json.Marshal(s.GetSettings())
+	if err != nil {
+		return
+	}
+
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('notify_settings', $1)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
 }
 
 // Send рассылает сообщение во все настроенные каналы.

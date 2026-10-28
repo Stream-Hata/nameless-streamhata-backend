@@ -186,7 +186,7 @@ func main() {
 	seventv.RegisterRoutes(srv, sevenTVService)
 	go sevenTVService.Run(ctx)
 
-	notifyService := notify.New()
+	notifyService := notify.New(musicDB)
 	notify.RegisterRoutes(srv, notifyService)
 	musicService.SetTelegramSender(notifyService.SendTelegramText)
 
