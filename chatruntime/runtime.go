@@ -908,6 +908,10 @@ func (r *Runtime) channelReward(ctx context.Context, method, id string, body map
 		Data []twitch.ChannelReward `json:"data"`
 	}
 	if err := r.doJSON(request, &payload); err != nil {
+		if strings.Contains(err.Error(), "403") {
+			return twitch.ChannelReward{}, errors.New("Twitch 403: переподключите аккаунт — нужен scope channel:manage:redemptions")
+		}
+
 		return twitch.ChannelReward{}, err
 	}
 	if len(payload.Data) == 0 {
