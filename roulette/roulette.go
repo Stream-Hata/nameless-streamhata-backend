@@ -261,6 +261,17 @@ func (s *Service) History(limit int) []Round {
 	return append([]Round(nil), s.history[:limit]...)
 }
 
+func (s *Service) Last() (Round, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.history) == 0 {
+		return Round{}, false
+	}
+
+	return s.history[0], true
+}
+
 func (s *Service) Spin(mode string) (Round, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

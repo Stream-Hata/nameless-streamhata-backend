@@ -353,6 +353,12 @@ func main() {
 			return pointsService.TopText()
 		case "points.shop":
 			return pointsService.ShopText()
+		case "roulette.last":
+			if round, ok := rouletteService.Last(); ok {
+				return round.Game.Title
+			}
+
+			return ""
 		case "widget.enabled":
 			if widgetsService.Get()[strings.TrimSpace(value)] {
 				return "включён"
@@ -1058,6 +1064,14 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 		}
 
 		return "алерт отправлен", nil, true
+	case "roulette.last":
+		if a.roulette != nil {
+			if round, ok := a.roulette.Last(); ok {
+				return round.Game.Title, nil, true
+			}
+		}
+
+		return "игра ещё не выпадала", nil, true
 	case "roulette.spin":
 		if a.roulette != nil {
 			if _, err := a.roulette.Spin(strings.TrimSpace(value)); err != nil {
