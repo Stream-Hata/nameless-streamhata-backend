@@ -135,7 +135,7 @@ func (s *Service) Vote(id, userID string) (Quote, bool) {
 
 	for index := range s.quotes {
 		quote := &s.quotes[index]
-		if quote.ID != id && fmt.Sprintf("%d", quote.Number) != id {
+		if quote.ID != id && fmt.Sprintf("%d", quote.Number) != id && !strings.Contains(strings.ToLower(quote.Text), strings.ToLower(id)) {
 			continue
 		}
 

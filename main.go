@@ -60,6 +60,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 	"github.com/p7x-dev/nameless-streamhata-backend/vaultsecrets"
 	"github.com/p7x-dev/nameless-streamhata-backend/viewer"
+	"github.com/p7x-dev/nameless-streamhata-backend/welcome"
 	"github.com/p7x-dev/nameless-streamhata-backend/widgets"
 )
 
@@ -202,6 +203,9 @@ func main() {
 		viewerRuntime,
 		alertsService,
 	)
+
+	welcomeService := welcome.New(musicDB, chatRuntime)
+	welcome.RegisterRoutes(srv, welcomeService)
 
 	ttsService := donations.NewTTS(musicDB, chatRuntime)
 	ttsService.SetStatsProvider(func() []string {
@@ -508,6 +512,7 @@ func main() {
 		}
 
 		timersService.NoteChatActivity()
+		welcomeService.HandleMessage(message)
 
 		if action, _, ok := triggersService.Match(message.Text); ok && action == "music.add" {
 			go musicService.HandleChatMessage(ctx, message)

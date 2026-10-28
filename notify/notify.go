@@ -150,6 +150,77 @@ func (s *Service) SendTelegramText(ctx context.Context, text string) error {
 	return s.sendTelegram(ctx, settings.TelegramToken, settings.TelegramChatID, text)
 }
 
+// Test sends a Telegram test message even when notifications are disabled.
+func (s *Service) Test(ctx context.Context) error {
+	settings := s.GetSettings()
+
+	if settings.TelegramToken == "" || settings.TelegramChatID == "" {
+		return fmt.Errorf("укажите Telegram bot token и chat id")
+	}
+
+	return s.sendTelegram(ctx, settings.TelegramToken, settings.TelegramChatID, "JuryKit: тестовое уведомление — канал связи работает")
+}
+
+// TelegramChats returns chats seen by the bot via getUpdates.
+func (s *Service) TelegramChats(ctx context.Context) ([]map[string]any, error) {
+	settings := s.GetSettings()
+	if settings.TelegramToken == "" {
+		return nil, fmt.Errorf("укажите Telegram bot token")
+	}
+
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?limit=100", settings.TelegramToken)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := s.http.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode >= 300 {
+		return nil, fmt.Errorf("telegram getUpdates returned %d", response.StatusCode)
+	}
+
+	var payload struct {
+		Result []struct {
+			Message *struct {
+				Chat struct {
+					ID       int64  `json:"id"`
+					Title    string `json:"title"`
+					Username string `json:"username"`
+					Type     string `json:"type"`
+				} `json:"chat"`
+			} `json:"message"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+
+	seen := make(map[int64]map[string]any)
+	for _, update := range payload.Result {
+		if update.Message == nil || update.Message.Chat.ID == 0 {
+			continue
+		}
+		chat := update.Message.Chat
+		seen[chat.ID] = map[string]any{
+			"id":       chat.ID,
+			"title":    chat.Title,
+			"username": chat.Username,
+			"type":     chat.Type,
+		}
+	}
+
+	result := make([]map[string]any, 0, len(seen))
+	for _, chat := range seen {
+		result = append(result, chat)
+	}
+	return result, nil
+}
+
 func (s *Service) sendDiscord(ctx context.Context, webhook, text string) error {
 	payload, err := json.Marshal(map[string]string{"content": text})
 	if err != nil {
@@ -316,6 +387,22 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, service.SetSettings(settings))
 	})
 
+	srv.ServeEndpoint("/rgg-sync/notify/telegram/chats", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		chats, err := service.TelegramChats(request.Context())
+		if err != nil {
+			writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
+
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"chats": chats})
+	})
+
 	srv.ServeEndpoint("/rgg-sync/notify/test", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
@@ -323,7 +410,11 @@ func RegisterRoutes(srv Deps, service *Service) {
 			return
 		}
 
-		service.Send(request.Context(), "JuryKit: тестовое уведомление — канал связи работает ✅")
+		if err := service.Test(request.Context()); err != nil {
+			writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
+
+			return
+		}
 
 		writeJSON(response, http.StatusOK, map[string]any{"ok": true})
 	})
