@@ -192,3 +192,21 @@ func TestReplyExpandsVariables(t *testing.T) {
 		t.Fatalf("reply variable was not expanded: %v", writer.messages)
 	}
 }
+
+func TestSingleChatMessageCollapsesLines(t *testing.T) {
+	text := "Правила чата:\n1. Уважай всех.\n2. Не спамь."
+	got := singleChatMessage(text, 500)
+	if got != "Правила чата: 1. Уважай всех. 2. Не спамь." {
+		t.Fatalf("unexpected message: %q", got)
+	}
+}
+
+func TestSingleChatMessageTruncates(t *testing.T) {
+	got := singleChatMessage(strings.Repeat("а", 600), 500)
+	if len([]rune(got)) != 500 {
+		t.Fatalf("expected 500 runes, got %d", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("expected ellipsis suffix: %q", got)
+	}
+}

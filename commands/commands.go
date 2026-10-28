@@ -516,9 +516,7 @@ func (s *Service) sendLimitReply(command Command, message twitch.TwitchChatMessa
 	if !strings.Contains(strings.ToLower(reply), strings.ToLower(mention)) {
 		reply = mention + ", " + reply
 	}
-	for _, chunk := range splitReply(reply, 450) {
-		_ = s.writer.Say(chunk)
-	}
+	_ = s.writer.Say(singleChatMessage(reply, 500))
 }
 
 func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string) {
@@ -737,47 +735,16 @@ func (s *Service) runByName(raw string, message twitch.TwitchChatMessage) {
 	}
 }
 
-func splitReply(text string, limit int) []string {
+func singleChatMessage(text string, limit int) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
-	parts := strings.Split(text, "\n")
-	result := make([]string, 0, len(parts))
+	text = strings.Join(strings.Fields(text), " ")
 
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		if len([]rune(part)) <= limit {
-			result = append(result, part)
-
-			continue
-		}
-
-		current := ""
-		for _, word := range strings.Fields(part) {
-			if current == "" {
-				current = word
-			} else if len([]rune(current))+1+len([]rune(word)) <= limit {
-				current += " " + word
-			} else {
-				result = append(result, current)
-				current = word
-			}
-			if len([]rune(current)) > limit {
-				runes := []rune(current)
-				for len(runes) > limit {
-					result = append(result, string(runes[:limit]))
-					runes = runes[limit:]
-				}
-				current = string(runes)
-			}
-		}
-		if current != "" {
-			result = append(result, current)
-		}
+	if len([]rune(text)) <= limit {
+		return text
 	}
 
-	return result
+	runes := []rune(text)
+	return string(runes[:limit-1]) + "…"
 }
 
 func (s *Service) sendReply(command Command, message twitch.TwitchChatMessage, response string) {
@@ -795,12 +762,8 @@ func (s *Service) sendReply(command Command, message twitch.TwitchChatMessage, r
 		reply = mention + ", " + reply
 	}
 
-	for _, chunk := range splitReply(reply, 450) {
-		if err := s.writer.Say(chunk); err != nil {
-			log.Printf("[Commands] send failed: %v", err)
-
-			return
-		}
+	if err := s.writer.Say(singleChatMessage(reply, 500)); err != nil {
+		log.Printf("[Commands] send failed: %v", err)
 	}
 }
 
