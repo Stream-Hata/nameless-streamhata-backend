@@ -443,7 +443,11 @@ func main() {
 				if err != nil {
 					log.Printf("[Triggers] %s failed: %v", action, err)
 				} else if text != "" {
-					_ = chatRuntime.Say("@" + message.Author.Login + ", " + text)
+					if strings.HasPrefix(text, "@") {
+						_ = chatRuntime.Say(text)
+					} else {
+						_ = chatRuntime.Say("@" + message.Author.Login + ", " + text)
+					}
 				}
 
 				return
@@ -814,7 +818,12 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 	case "dice":
 		count, sides := 1, 6
 		if raw := strings.ToLower(strings.TrimSpace(value)); raw != "" {
-			if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err != nil || count < 1 || count > 20 || sides < 2 || sides > 1000 {
+			if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err != nil {
+				if _, err := fmt.Sscanf(raw, "d%d", &sides); err != nil {
+					count, sides = 1, 6
+				}
+			}
+			if count < 1 || count > 20 || sides < 1 || sides > 1000 {
 				count, sides = 1, 6
 			}
 		}
@@ -827,7 +836,7 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 		}
 		formula := fmt.Sprintf("%dd%d", count, sides)
 		a.sync.RollDice(formula, total, rolls, message.Author.DisplayName)
-		return fmt.Sprintf("%s: %d", formula, total), nil, true
+		return "@" + message.Author.Login + " бросил кость и ему выпало " + strconv.Itoa(total), nil, true
 	case "coinflip":
 		if rand.Intn(2) == 0 {
 			return "орёл", nil, true
