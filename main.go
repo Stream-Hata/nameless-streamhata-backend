@@ -940,11 +940,21 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 		a.sync.PublishGame("dice", formula, strconv.Itoa(total), message.Author.DisplayName)
 		return "@" + message.Author.Login + " бросил кубик " + formula + " и ему выпало " + strconv.Itoa(total), nil, true
 	case "coinflip":
-		result := "орёл"
-		if rand.Intn(2) == 0 {
-			result = "решка"
+		heads, tails := "орёл", "решка"
+		if a.widgets != nil {
+			config := a.widgets.GetConfig("coinflip")
+			if value, ok := config["coinHeads"].(string); ok && strings.TrimSpace(value) != "" {
+				heads = strings.TrimSpace(value)
+			}
+			if value, ok := config["coinTails"].(string); ok && strings.TrimSpace(value) != "" {
+				tails = strings.TrimSpace(value)
+			}
 		}
-		a.sync.PublishGame("coin", "монетка", result, message.Author.DisplayName)
+		result, side := heads, "heads"
+		if rand.Intn(2) == 0 {
+			result, side = tails, "tails"
+		}
+		a.sync.PublishGameSide("coin", "монетка", result, side, message.Author.DisplayName)
 		return "@" + message.Author.Login + " бросил монетку и ему выпало " + result, nil, true
 	case "quote.add":
 		quote, err := a.quotes.Add(strings.TrimSpace(value), message.Author.DisplayName, message.Author.Login)

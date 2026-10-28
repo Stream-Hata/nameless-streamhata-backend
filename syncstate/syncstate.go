@@ -43,6 +43,7 @@ type GameState struct {
 	Kind     string    `json:"kind"`
 	Label    string    `json:"label"`
 	Result   string    `json:"result"`
+	Side     string    `json:"side"`
 	Viewer   string    `json:"viewer"`
 	RolledAt time.Time `json:"rolledAt"`
 }
@@ -255,6 +256,11 @@ func (s *Service) RollDice(formula string, result int, rolls []int, viewer strin
 
 // PublishGame stores the latest game result for the game overlays.
 func (s *Service) PublishGame(kind, label, result, viewer string) GameState {
+	return s.PublishGameSide(kind, label, result, "", viewer)
+}
+
+// PublishGameSide stores a game result with an optional side (coin heads/tails).
+func (s *Service) PublishGameSide(kind, label, result, side, viewer string) GameState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -262,6 +268,7 @@ func (s *Service) PublishGame(kind, label, result, viewer string) GameState {
 		Kind:     kind,
 		Label:    label,
 		Result:   result,
+		Side:     side,
 		Viewer:   viewer,
 		RolledAt: time.Now(),
 	}
