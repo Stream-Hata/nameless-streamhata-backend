@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1136,6 +1137,36 @@ func RegisterRoutes(srv Deps, service *Service) {
 		}
 
 		writeJSON(response, http.StatusOK, saved)
+	})
+
+	srv.ServeEndpoint("/rgg-sync/commands/export", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		list := service.List()
+		sort.Slice(list, func(left, right int) bool {
+			return strings.ToLower(list[left].Name) < strings.ToLower(list[right].Name)
+		})
+
+		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		response.Header().Set("Content-Disposition", `attachment; filename="streamhata-commands.txt"`)
+		_, _ = fmt.Fprintf(response, "# StreamHata commands: %d\n\n", len(list))
+
+		for _, command := range list {
+			_, _ = fmt.Fprintf(response, "!%s\n", command.Name)
+			_, _ = fmt.Fprintf(response, "aliases: %s\n", strings.Join(command.Aliases, ", "))
+			_, _ = fmt.Fprintf(response, "action: %s\n", command.Action)
+			_, _ = fmt.Fprintf(response, "cooldown: %d\n", command.CooldownSeconds)
+			_, _ = fmt.Fprintf(response, "level: %s\n", command.UserLevel)
+			_, _ = fmt.Fprintf(response, "enabled: %t\n", command.Enabled)
+			_, _ = fmt.Fprintf(response, "response: |\n  %s\n", strings.ReplaceAll(command.Response, "\n", "\n  "))
+			_, _ = fmt.Fprintf(response, "reply: |\n  %s\n", strings.ReplaceAll(command.Reply, "\n", "\n  "))
+			_, _ = fmt.Fprintf(response, "limitReply: |\n  %s\n", strings.ReplaceAll(command.LimitReply, "\n", "\n  "))
+			_, _ = fmt.Fprint(response, "---\n")
+		}
 	})
 
 	srv.ServeEndpoint("/rgg-sync/commands/{id}/test", func(response http.ResponseWriter, request *http.Request) {

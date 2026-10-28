@@ -599,6 +599,9 @@ func (s *Service) TelegramPage(page, perPage int) (string, int) {
 
 	body.WriteString("<b>🎵 Трек-лист Nameless StreamHata</b>\n")
 	body.WriteString(fmt.Sprintf("<i>%d треков · %s · стр. %d/%d</i>\n\n", len(tracks), formatDuration(total), page+1, pages))
+	body.WriteString("<pre>\n")
+	body.WriteString(fmt.Sprintf("%-2s  %-30s %-18s %5s\n", "#", "Трек", "Автор", "Время"))
+	body.WriteString(strings.Repeat("─", 60) + "\n")
 
 	start := page * perPage
 	end := start + perPage
@@ -608,29 +611,32 @@ func (s *Service) TelegramPage(page, perPage int) (string, int) {
 
 	for index := start; index < end; index++ {
 		track := tracks[index]
-		meta := make([]string, 0, 4)
-
-		if track.Author != "" {
-			meta = append(meta, escapeHTML(track.Author))
-		}
-		if track.Album != "" {
-			meta = append(meta, escapeHTML(track.Album))
-		}
-		if track.Year > 0 {
-			meta = append(meta, strconv.Itoa(track.Year))
-		}
-		meta = append(meta, formatDuration(track.DurationSeconds))
-
 		body.WriteString(fmt.Sprintf(
-			"%d. <a href=\"%s\">%s</a>\n   <i>%s</i>\n",
+			"%-2d  %-30s %-18s %5s\n",
 			index+1,
-			escapeHTML(track.URL),
-			escapeHTML(track.Title),
-			strings.Join(meta, " · "),
+			escapeHTML(clipRunes(track.Title, 30)),
+			escapeHTML(clipRunes(track.Author, 18)),
+			formatDuration(track.DurationSeconds),
 		))
 	}
 
-	return strings.TrimSpace(body.String()), pages
+	body.WriteString("</pre>")
+
+	return body.String(), pages
+}
+
+func clipRunes(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return string(runes)
+	}
+
+	if limit <= 1 {
+		return string(runes[:limit])
+	}
+
+	return string(runes[:limit-1]) + "…"
 }
 
 func formatDuration(total int) string {
