@@ -309,6 +309,9 @@ func main() {
 		case "timestamp":
 			return strconv.FormatInt(time.Now().Unix(), 10)
 		case "random":
+			if minimum, maximum, ok := parseRange(value); ok {
+				return strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
+			}
 			options := strings.Split(value, "|")
 			clean := options[:0]
 			for _, item := range options {
@@ -794,6 +797,25 @@ func (a commandActioner) Twitch(ctx context.Context, action, userID string) stri
 	return ""
 }
 
+func parseRange(raw string) (int, int, bool) {
+	value := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(raw), "..", "-"), ":", "-")
+	parts := strings.Split(value, "-")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+
+	minimum, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, false
+	}
+	maximum, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || maximum < minimum {
+		return 0, 0, false
+	}
+
+	return minimum, maximum, true
+}
+
 func (a commandActioner) resolveTarget(ctx context.Context, message twitch.TwitchChatMessage, value string) (string, string, error) {
 	fields := strings.Fields(strings.TrimSpace(value))
 	if len(fields) == 0 {
@@ -951,7 +973,10 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 			}
 		}
 		result, side := heads, "heads"
-		if rand.Intn(2) == 0 {
+		choice := strings.ToLower(strings.TrimSpace(value))
+		forceTails := strings.Contains(choice, "tail") || strings.Contains(choice, "реш") || strings.Contains(choice, "reverse") || strings.Contains(choice, "ревер")
+		forceHeads := strings.Contains(choice, "head") || strings.Contains(choice, "орёл") || strings.Contains(choice, "орел")
+		if forceTails || (!forceHeads && rand.Intn(2) == 0) {
 			result, side = tails, "tails"
 		}
 		a.sync.PublishGameSide("coin", "монетка", result, side, message.Author.DisplayName)
@@ -1136,6 +1161,12 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 	case "points.balance", "points.top", "points.shop", "quotes.random":
 		return a.Twitch(ctx, action, message.Author.ID), nil, true
 	case "random":
+		if minimum, maximum, ok := parseRange(value); ok {
+			chosen := strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
+			a.sync.PublishGame("random", value, chosen, message.Author.DisplayName)
+
+			return "@" + message.Author.Login + " случайное число: " + chosen, nil, true
+		}
 		options := strings.Split(value, "|")
 		clean := options[:0]
 		for _, item := range options {
@@ -1144,7 +1175,7 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 			}
 		}
 		if len(clean) == 0 {
-			return "", fmt.Errorf("нужно хотя бы одно значение"), true
+			return "", fmt.Errorf("нужно хотя бы одно значение или диапазон 1-100"), true
 		}
 		chosen := clean[rand.Intn(len(clean))]
 		a.sync.PublishGame("random", value, chosen, message.Author.DisplayName)
