@@ -27,6 +27,7 @@ type Command struct {
 	Action          string    `json:"action"`
 	Response        string    `json:"response"`
 	Reply           string    `json:"reply"`
+	LimitReply      string    `json:"limitReply"`
 	CooldownSeconds int       `json:"cooldownSeconds"`
 	UserLevel       string    `json:"userLevel"`
 	Enabled         bool      `json:"enabled"`
@@ -77,6 +78,7 @@ type Service struct {
 	custom    map[string]Variable
 	actions   map[string]string
 	replies   map[string]string
+	limits    map[string]string
 	db        *sql.DB
 	now       func() time.Time
 }
@@ -102,6 +104,7 @@ func New(writer chat.Writer, db *sql.DB) *Service {
 		custom:    make(map[string]Variable),
 		actions:   make(map[string]string),
 		replies:   make(map[string]string),
+		limits:    make(map[string]string),
 		writer:    writer,
 		db:        db,
 		now:       time.Now,
@@ -110,6 +113,7 @@ func New(writer chat.Writer, db *sql.DB) *Service {
 	service.load()
 	service.loadActions()
 	service.loadReplies()
+	service.loadLimits()
 	service.loadVariables()
 
 	return service
@@ -220,11 +224,13 @@ func (s *Service) Upsert(command Command) (Command, error) {
 	s.commands[command.Name] = &command
 	s.actions[command.ID] = command.Action
 	s.replies[command.ID] = command.Reply
+	s.limits[command.ID] = command.LimitReply
 	s.mu.Unlock()
 
 	s.persist(command)
 	s.persistActions()
 	s.persistReplies()
+	s.persistLimits()
 
 	return command, nil
 }
@@ -258,8 +264,10 @@ func (s *Service) Delete(id string) bool {
 			delete(s.commands, name)
 			delete(s.actions, command.ID)
 			delete(s.replies, command.ID)
+			delete(s.limits, command.ID)
 			s.persistActions()
 			s.persistReplies()
+			s.persistLimits()
 
 			if s.db != nil {
 				_, _ = s.db.ExecContext(context.Background(), `DELETE FROM command WHERE id = $1`, id)
@@ -354,7 +362,16 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 	now := s.now()
 
 	if until, cooling := s.cooldowns[userKey]; cooling && now.Before(until) {
+		limitReply := strings.TrimSpace(s.expand(command.LimitReply, message))
 		s.mu.Unlock()
+
+		if limitReply != "" && s.writer != nil {
+			mention := "@" + message.Author.Login
+			if !strings.Contains(strings.ToLower(limitReply), strings.ToLower(mention)) {
+				limitReply = mention + ", " + limitReply
+			}
+			_ = s.writer.Say(limitReply)
+		}
 
 		return
 	}
@@ -804,6 +821,9 @@ func (s *Service) loadReplies() {
 		if reply := s.replies[command.ID]; reply != "" {
 			command.Reply = reply
 		}
+		if limit := s.limits[command.ID]; limit != "" {
+			command.LimitReply = limit
+		}
 	}
 }
 
@@ -818,6 +838,38 @@ func (s *Service) persistReplies() {
 	}
 
 	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_replies', $1)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+}
+
+func (s *Service) loadLimits() {
+	if s.db == nil {
+		return
+	}
+
+	var raw []byte
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'command_limits'`).Scan(&raw); err != nil {
+		return
+	}
+
+	_ = json.Unmarshal(raw, &s.limits)
+	for _, command := range s.commands {
+		if limit := s.limits[command.ID]; limit != "" {
+			command.LimitReply = limit
+		}
+	}
+}
+
+func (s *Service) persistLimits() {
+	if s.db == nil {
+		return
+	}
+
+	raw, err := json.Marshal(s.limits)
+	if err != nil {
+		return
+	}
+
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_limits', $1)
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
 }
 
@@ -938,6 +990,9 @@ func (s *Service) load() {
 		}
 		if reply := s.replies[command.ID]; reply != "" {
 			command.Reply = reply
+		}
+		if limit := s.limits[command.ID]; limit != "" {
+			command.LimitReply = limit
 		}
 		s.commands[command.Name] = &command
 	}
