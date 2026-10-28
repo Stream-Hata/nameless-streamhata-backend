@@ -952,7 +952,11 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 					formula = "1d6"
 				}
 			}
-			if count < 1 || count > 20 || sides < 1 || sides > 1000 {
+			if count < 1 || count > 20 || sides < 1 || sides > 100 {
+				if sides > 100 {
+					return "@" + message.Author.Login + ", максимум 100 сторон у кубика", nil, true
+				}
+
 				count, sides = 1, 6
 				formula = "1d6"
 			}
