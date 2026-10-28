@@ -30,6 +30,7 @@ type Command struct {
 	Response        string    `json:"response"`
 	Reply           string    `json:"reply"`
 	LimitReply      string    `json:"limitReply"`
+	LineBreaks      bool      `json:"lineBreaks"`
 	CooldownSeconds int       `json:"cooldownSeconds"`
 	UserLevel       string    `json:"userLevel"`
 	Enabled         bool      `json:"enabled"`
@@ -761,6 +762,24 @@ func (s *Service) sendReply(command Command, message twitch.TwitchChatMessage, r
 	mention := "@" + message.Author.Login
 	if !strings.Contains(strings.ToLower(reply), strings.ToLower(mention)) {
 		reply = mention + ", " + reply
+	}
+
+	if command.LineBreaks && strings.Contains(reply, "\n") {
+		lines := strings.Split(strings.ReplaceAll(reply, "\r\n", "\n"), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			line = singleChatMessage(line, 500)
+			if err := s.writer.Say(line); err != nil {
+				log.Printf("[Commands] send failed: %v", err)
+
+				return
+			}
+		}
+
+		return
 	}
 
 	if err := s.writer.Say(singleChatMessage(reply, 500)); err != nil {

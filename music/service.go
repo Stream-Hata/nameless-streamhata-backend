@@ -597,9 +597,9 @@ func (s *Service) TelegramPage(page, perPage int) (string, int) {
 
 	var body strings.Builder
 
-	body.WriteString("<b>🎵 Трек-лист Nameless StreamHata</b>\n")
-	body.WriteString(fmt.Sprintf("<i>%d треков · %s · стр. %d/%d</i>\n\n", len(tracks), formatDuration(total), page+1, pages))
-	body.WriteString("<pre>\n")
+	body.WriteString("*🎵 Трек-лист Nameless StreamHata*\n")
+	body.WriteString(fmt.Sprintf("_%d треков · %s · стр. %d/%d_\n\n", len(tracks), formatDuration(total), page+1, pages))
+	body.WriteString("```\n")
 	body.WriteString(fmt.Sprintf("%-2s  %-30s %-18s %5s\n", "#", "Трек", "Автор", "Время"))
 	body.WriteString(strings.Repeat("─", 60) + "\n")
 
@@ -614,15 +614,20 @@ func (s *Service) TelegramPage(page, perPage int) (string, int) {
 		body.WriteString(fmt.Sprintf(
 			"%-2d  %-30s %-18s %5s\n",
 			index+1,
-			escapeHTML(clipRunes(track.Title, 30)),
-			escapeHTML(clipRunes(track.Author, 18)),
+			markdownCode(clipRunes(track.Title, 30)),
+			markdownCode(clipRunes(track.Author, 18)),
 			formatDuration(track.DurationSeconds),
 		))
 	}
 
-	body.WriteString("</pre>")
+	body.WriteString("```")
 
 	return body.String(), pages
+}
+
+func markdownCode(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	return strings.ReplaceAll(value, "`", "\\`")
 }
 
 func clipRunes(value string, limit int) string {

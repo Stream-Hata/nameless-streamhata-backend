@@ -117,8 +117,19 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 		}
 	case "/music":
 		if music != nil {
-			page, pages := music(0)
-			_ = s.sendTelegramPage(ctx, page, pages, 0)
+			requested := 0
+			if fields := strings.Fields(text); len(fields) > 1 {
+				requested, _ = strconv.Atoi(fields[1])
+				requested--
+			}
+			page, pages := music(requested)
+			if requested < 0 {
+				requested = 0
+			}
+			if requested >= pages {
+				requested = pages - 1
+			}
+			_ = s.sendTelegramPage(ctx, page, pages, requested)
 
 			return
 		}
@@ -152,20 +163,28 @@ func (s *Service) handleTelegramCallback(ctx context.Context, query *TelegramCal
 	page := 0
 	_, _ = fmt.Sscanf(strings.TrimPrefix(query.Data, "music:"), "%d", &page)
 	text, pages := music(page)
+	if page < 0 {
+		page = 0
+	}
+	if page >= pages {
+		page = pages - 1
+	}
 	_ = s.editTelegramPage(ctx, query.Message.MessageID, text, pages, page)
 }
 
 func (s *Service) telegramKeyboard(page, pages int) map[string]any {
-	row := make([]map[string]string, 0, 3)
+	row := make([]map[string]string, 0, 5)
 
 	if page > 0 {
-		row = append(row, map[string]string{"text": "‹ Назад", "callback_data": fmt.Sprintf("music:%d", page-1)})
+		row = append(row, map[string]string{"text": "« 1", "callback_data": "music:0"})
+		row = append(row, map[string]string{"text": "‹", "callback_data": fmt.Sprintf("music:%d", page-1)})
 	}
 
 	row = append(row, map[string]string{"text": fmt.Sprintf("%d/%d", page+1, pages), "callback_data": "music:noop"})
 
 	if page+1 < pages {
-		row = append(row, map[string]string{"text": "Вперёд ›", "callback_data": fmt.Sprintf("music:%d", page+1)})
+		row = append(row, map[string]string{"text": "›", "callback_data": fmt.Sprintf("music:%d", page+1)})
+		row = append(row, map[string]string{"text": fmt.Sprintf("%d »", pages), "callback_data": fmt.Sprintf("music:%d", pages-1)})
 	}
 
 	return map[string]any{"inline_keyboard": [][]map[string]string{row}}
@@ -180,7 +199,7 @@ func (s *Service) sendTelegramPage(ctx context.Context, text string, pages, page
 	payload := map[string]any{
 		"chat_id":                  settings.TelegramChatID,
 		"text":                     text,
-		"parse_mode":               "HTML",
+		"parse_mode":               "MarkdownV2",
 		"disable_web_page_preview": true,
 		"reply_markup":             s.telegramKeyboard(page, pages),
 	}
@@ -198,7 +217,7 @@ func (s *Service) editTelegramPage(ctx context.Context, messageID int64, text st
 		"chat_id":                  settings.TelegramChatID,
 		"message_id":               messageID,
 		"text":                     text,
-		"parse_mode":               "HTML",
+		"parse_mode":               "MarkdownV2",
 		"disable_web_page_preview": true,
 		"reply_markup":             s.telegramKeyboard(page, pages),
 	}
