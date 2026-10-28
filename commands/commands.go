@@ -447,7 +447,13 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 	}
 
 	if advanced, ok := s.actioner.(AdvancedActioner); ok && isAdvancedAction(command.Action) {
-		if text, err, handled := advanced.Perform(context.Background(), command.Action, strings.TrimSpace(command.Response), message); handled {
+		value := strings.TrimSpace(command.Response)
+		if command.Action == "dice" {
+			if fields := strings.Fields(message.Text); len(fields) > 1 {
+				value = strings.Join(fields[1:], " ")
+			}
+		}
+		if text, err, handled := advanced.Perform(context.Background(), command.Action, value, message); handled {
 			if err != nil {
 				log.Printf("[Commands] %s failed: %v", command.Action, err)
 

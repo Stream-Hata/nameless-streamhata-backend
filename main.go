@@ -817,14 +817,18 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 		return "голосование запущено", err, true
 	case "dice":
 		count, sides := 1, 6
+		formula := "1d6"
 		if raw := strings.ToLower(strings.TrimSpace(value)); raw != "" {
+			formula = raw
 			if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err != nil {
 				if _, err := fmt.Sscanf(raw, "d%d", &sides); err != nil {
 					count, sides = 1, 6
+					formula = "1d6"
 				}
 			}
 			if count < 1 || count > 20 || sides < 1 || sides > 1000 {
 				count, sides = 1, 6
+				formula = "1d6"
 			}
 		}
 		rolls := make([]int, 0, count)
@@ -834,9 +838,8 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 			rolls = append(rolls, roll)
 			total += roll
 		}
-		formula := fmt.Sprintf("%dd%d", count, sides)
 		a.sync.RollDice(formula, total, rolls, message.Author.DisplayName)
-		return "@" + message.Author.Login + " бросил кость и ему выпало " + strconv.Itoa(total), nil, true
+		return "@" + message.Author.Login + " бросил кубик " + formula + " и ему выпало " + strconv.Itoa(total), nil, true
 	case "coinflip":
 		if rand.Intn(2) == 0 {
 			return "орёл", nil, true
