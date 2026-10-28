@@ -972,6 +972,7 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 		_, err := a.chat.CreatePoll(ctx, title, choices, duration)
 		return "голосование запущено", err, true
 	case "dice":
+		log.Printf("[Dice] perform value=%q text=%q", value, message.Text)
 		count, sides := 1, 6
 		formula := "1d6"
 		if raw := strings.ToLower(strings.TrimSpace(value)); raw != "" {

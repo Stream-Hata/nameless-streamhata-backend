@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/p7x-dev/nameless-streamhata-backend/bots"
 	"github.com/p7x-dev/nameless-streamhata-backend/chat"
 	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 )
@@ -335,6 +336,10 @@ func (s *Service) DeleteVariable(id string) bool {
 
 // HandleMessage вызывается из шины чата.
 func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
+	if bots.Is(message.Author.Login) {
+		return
+	}
+
 	text := strings.TrimSpace(message.Text)
 
 	if !strings.HasPrefix(text, "!") {
@@ -511,7 +516,9 @@ func (s *Service) sendLimitReply(command Command, message twitch.TwitchChatMessa
 	if !strings.Contains(strings.ToLower(reply), strings.ToLower(mention)) {
 		reply = mention + ", " + reply
 	}
-	_ = s.writer.Say(reply)
+	for _, chunk := range splitReply(reply, 450) {
+		_ = s.writer.Say(chunk)
+	}
 }
 
 func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string) {
@@ -552,8 +559,12 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 	}
 
 	if command.Action == "say" && isDiceCommand(command, message) {
+		log.Printf("[Dice] say command=%q text=%q arg=%q", command.Name, message.Text, diceArgument(message))
 		if advanced, ok := s.actioner.(AdvancedActioner); ok {
-			_, _, _ = advanced.Perform(context.Background(), "dice", diceArgument(message), message)
+			text, err, handled := advanced.Perform(context.Background(), "dice", diceArgument(message), message)
+			log.Printf("[Dice] perform handled=%v err=%v text=%q", handled, err, text)
+		} else {
+			log.Printf("[Dice] actioner does not implement AdvancedActioner")
 		}
 	}
 
@@ -726,6 +737,49 @@ func (s *Service) runByName(raw string, message twitch.TwitchChatMessage) {
 	}
 }
 
+func splitReply(text string, limit int) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	parts := strings.Split(text, "\n")
+	result := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if len([]rune(part)) <= limit {
+			result = append(result, part)
+
+			continue
+		}
+
+		current := ""
+		for _, word := range strings.Fields(part) {
+			if current == "" {
+				current = word
+			} else if len([]rune(current))+1+len([]rune(word)) <= limit {
+				current += " " + word
+			} else {
+				result = append(result, current)
+				current = word
+			}
+			if len([]rune(current)) > limit {
+				runes := []rune(current)
+				for len(runes) > limit {
+					result = append(result, string(runes[:limit]))
+					runes = runes[limit:]
+				}
+				current = string(runes)
+			}
+		}
+		if current != "" {
+			result = append(result, current)
+		}
+	}
+
+	return result
+}
+
 func (s *Service) sendReply(command Command, message twitch.TwitchChatMessage, response string) {
 	reply := strings.TrimSpace(s.expand(command.Reply, message))
 	if reply == "" {
@@ -741,8 +795,12 @@ func (s *Service) sendReply(command Command, message twitch.TwitchChatMessage, r
 		reply = mention + ", " + reply
 	}
 
-	if err := s.writer.Say(reply); err != nil {
-		log.Printf("[Commands] send failed: %v", err)
+	for _, chunk := range splitReply(reply, 450) {
+		if err := s.writer.Say(chunk); err != nil {
+			log.Printf("[Commands] send failed: %v", err)
+
+			return
+		}
 	}
 }
 
