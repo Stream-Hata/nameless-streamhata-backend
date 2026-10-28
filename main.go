@@ -505,6 +505,23 @@ func main() {
 		log.Printf("[Chat] runtime start failed: %v", err)
 	}
 
+	go notifyService.TelegramBotLoop(ctx, func() string {
+		viewers, _ := chatRuntime.GetStreamViewers(ctx)
+		started, _ := chatRuntime.StreamStartedAt(ctx)
+		if started == "" {
+			return "Стрим не в эфире"
+		}
+
+		return fmt.Sprintf("В эфире, зрителей: %d, с %s", viewers, started)
+	}, func() string {
+		track := musicService.Current()
+		if track == nil {
+			return "Сейчас ничего не играет"
+		}
+
+		return track.Title + " — " + track.URL
+	})
+
 	// Конвейер чата: активность таймеров, команды, модерация, баллы, игры.
 	chatService.Subscribe(func(message twitch.TwitchChatMessage) {
 		if chatRuntime.IsOwnText(message.Text) {

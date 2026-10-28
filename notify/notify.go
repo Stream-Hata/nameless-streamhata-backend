@@ -288,6 +288,9 @@ func (s *Service) sendDiscord(ctx context.Context, webhook, text string) error {
 
 func (s *Service) sendTelegram(ctx context.Context, token, chatID, text string) error {
 	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
+	if len([]rune(text)) > 4000 {
+		text = string([]rune(text)[:4000]) + "…"
+	}
 
 	payload, err := json.Marshal(map[string]string{
 		"chat_id": chatID,
@@ -314,6 +317,14 @@ func (s *Service) sendTelegram(ctx context.Context, token, chatID, text string) 
 	}()
 
 	if response.StatusCode >= 300 {
+		var errorPayload struct {
+			Description string `json:"description"`
+		}
+		_ = json.NewDecoder(response.Body).Decode(&errorPayload)
+		if errorPayload.Description != "" {
+			return fmt.Errorf("telegram: %s", errorPayload.Description)
+		}
+
 		return fmt.Errorf("telegram returned %d", response.StatusCode)
 	}
 

@@ -119,7 +119,8 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 			"moderator:manage:announcements "+
 			"moderator:manage:shoutouts "+
 			"channel:manage:raids "+
-			"moderator:manage:moderators "+
+			"channel:edit:commercial "+
+			"channel:manage:moderators "+
 			"channel:manage:vips "+
 			"moderator:manage:chat_settings "+
 			"moderator:read:shield_mode "+
