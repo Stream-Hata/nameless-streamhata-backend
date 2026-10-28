@@ -481,6 +481,39 @@ func isDiceCommand(command Command, message twitch.TwitchChatMessage) bool {
 	return false
 }
 
+func diceLimits(value string, message twitch.TwitchChatMessage) (int, int) {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	if fields := strings.Fields(message.Text); len(fields) > 1 {
+		raw = strings.ToLower(strings.TrimSpace(fields[1]))
+	}
+
+	count, sides := 1, 6
+	if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err != nil {
+		if _, err := fmt.Sscanf(raw, "d%d", &sides); err != nil {
+			return 1, 6
+		}
+	}
+
+	return count, sides
+}
+
+func (s *Service) sendLimitReply(command Command, message twitch.TwitchChatMessage, fallback string) {
+	reply := strings.TrimSpace(s.expand(command.LimitReply, message))
+	if reply == "" {
+		reply = fallback
+	}
+
+	if s.writer == nil || reply == "" {
+		return
+	}
+
+	mention := "@" + message.Author.Login
+	if !strings.Contains(strings.ToLower(reply), strings.ToLower(mention)) {
+		reply = mention + ", " + reply
+	}
+	_ = s.writer.Say(reply)
+}
+
 func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string) {
 	defer func() { s.sendReply(command, message, response) }()
 
@@ -500,16 +533,21 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 		return
 	}
 
-	if command.Action == "say" && isDiceCommand(command, message) {
-		if advanced, ok := s.actioner.(AdvancedActioner); ok {
-			if text, _, handled := advanced.Perform(context.Background(), "dice", diceArgument(message), message); handled && strings.Contains(text, "максимум 100") {
-				if s.writer != nil {
-					_ = s.writer.Say(text)
-				}
+	if command.Action == "dice" || (command.Action == "say" && isDiceCommand(command, message)) {
+		value := strings.TrimSpace(command.Response)
+		if command.Action == "say" {
+			value = diceArgument(message)
+		} else if fields := strings.Fields(message.Text); len(fields) > 1 {
+			value = strings.Join(fields[1:], " ")
+		}
 
-				command.Reply = ""
-				response = ""
-			}
+		count, sides := diceLimits(value, message)
+		if count > 20 || sides > 100 {
+			s.sendLimitReply(command, message, "максимум 100 сторон и 20 кубиков")
+			command.Reply = ""
+			response = ""
+
+			return
 		}
 	}
 
