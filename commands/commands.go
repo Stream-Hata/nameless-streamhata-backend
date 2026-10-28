@@ -551,6 +551,12 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 		}
 	}
 
+	if command.Action == "say" && isDiceCommand(command, message) {
+		if advanced, ok := s.actioner.(AdvancedActioner); ok {
+			_, _, _ = advanced.Perform(context.Background(), "dice", diceArgument(message), message)
+		}
+	}
+
 	if advanced, ok := s.actioner.(AdvancedActioner); ok && isAdvancedAction(command.Action) {
 		value := strings.TrimSpace(command.Response)
 		if command.Action == "dice" {
