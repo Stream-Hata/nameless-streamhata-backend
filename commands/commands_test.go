@@ -210,3 +210,16 @@ func TestSingleChatMessageTruncates(t *testing.T) {
 		t.Fatalf("expected ellipsis suffix: %q", got)
 	}
 }
+
+func TestLineBreakReplySendsEachLine(t *testing.T) {
+	writer := &fakeWriter{}
+	service := New(writer, nil)
+	service.sendReply(Command{Reply: "Первая\nВторая", LineBreaks: true}, message("1", "Иван", "!rules"), "")
+
+	if len(writer.messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %#v", len(writer.messages), writer.messages)
+	}
+	if !strings.Contains(writer.messages[0], "Первая") || !strings.Contains(writer.messages[1], "Вторая") {
+		t.Fatalf("unexpected messages: %#v", writer.messages)
+	}
+}

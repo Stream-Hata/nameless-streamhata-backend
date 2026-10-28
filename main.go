@@ -123,6 +123,26 @@ func main() {
 		musicDB = nil
 	}
 
+	srv.ServeEndpoint("/health", func(response http.ResponseWriter, request *http.Request) {
+		if musicDB == nil {
+			http.Error(response, "database unavailable", http.StatusServiceUnavailable)
+
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+		defer cancel()
+
+		if err := musicDB.PingContext(ctx); err != nil {
+			http.Error(response, "database unavailable", http.StatusServiceUnavailable)
+
+			return
+		}
+
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = response.Write([]byte(`{"ok":true}`))
+	})
+
 	eventsService := events.New(musicDB)
 	lots.RegisterRoutes(srv)
 	events.RegisterRoutes(srv, eventsService)

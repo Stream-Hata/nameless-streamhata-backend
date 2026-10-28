@@ -21,6 +21,10 @@ type TelegramMessage struct {
 	Chat      struct {
 		ID int64 `json:"id"`
 	} `json:"chat"`
+	From *struct {
+		Username  string `json:"username"`
+		FirstName string `json:"first_name"`
+	} `json:"from"`
 	Text string `json:"text"`
 }
 
@@ -106,6 +110,19 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 	}
 
 	text := strings.TrimSpace(update.Message.Text)
+	userName := "друг"
+	if update.Message.From != nil {
+		if update.Message.From.Username != "" {
+			userName = "@" + update.Message.From.Username
+		} else if update.Message.From.FirstName != "" {
+			userName = update.Message.From.FirstName
+		}
+	}
+	if custom, ok := s.matchTelegramCommand(text, userName); ok {
+		_ = s.SendTelegramText(ctx, custom)
+
+		return
+	}
 	command := strings.ToLower(strings.Split(text, " ")[0])
 	var reply string
 	switch command {

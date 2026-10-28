@@ -39,10 +39,11 @@ func defaultSettings() Settings {
 }
 
 type Service struct {
-	mu       sync.Mutex
-	settings Settings
-	http     *http.Client
-	db       *sql.DB
+	mu               sync.Mutex
+	settings         Settings
+	telegramCommands []TelegramCommand
+	http             *http.Client
+	db               *sql.DB
 }
 
 func New(db *sql.DB) *Service {
@@ -52,6 +53,7 @@ func New(db *sql.DB) *Service {
 		db:       db,
 	}
 	service.load()
+	service.loadTelegramCommands()
 
 	return service
 }
@@ -410,6 +412,7 @@ type Deps interface {
 }
 
 func RegisterRoutes(srv Deps, service *Service) {
+	registerTelegramCommandRoutes(srv, service)
 	srv.ServeEndpoint("/rgg-sync/notify", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, service.GetSettings())
