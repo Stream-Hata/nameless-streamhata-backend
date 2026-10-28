@@ -570,6 +570,69 @@ func buildTelegramChunks(tracks []Track) []string {
 	return chunks
 }
 
+// TelegramPage возвращает одну страницу трек-листа для Telegram и число страниц.
+func (s *Service) TelegramPage(page, perPage int) (string, int) {
+	tracks := s.List()
+
+	if perPage <= 0 {
+		perPage = 10
+	}
+
+	pages := (len(tracks) + perPage - 1) / perPage
+	if pages == 0 {
+		pages = 1
+	}
+
+	if page < 0 {
+		page = 0
+	}
+	if page >= pages {
+		page = pages - 1
+	}
+
+	total := 0
+	for _, track := range tracks {
+		total += track.DurationSeconds
+	}
+
+	var body strings.Builder
+
+	body.WriteString("<b>🎵 Трек-лист Nameless StreamHata</b>\n")
+	body.WriteString(fmt.Sprintf("<i>%d треков · %s · стр. %d/%d</i>\n\n", len(tracks), formatDuration(total), page+1, pages))
+
+	start := page * perPage
+	end := start + perPage
+	if end > len(tracks) {
+		end = len(tracks)
+	}
+
+	for index := start; index < end; index++ {
+		track := tracks[index]
+		meta := make([]string, 0, 4)
+
+		if track.Author != "" {
+			meta = append(meta, escapeHTML(track.Author))
+		}
+		if track.Album != "" {
+			meta = append(meta, escapeHTML(track.Album))
+		}
+		if track.Year > 0 {
+			meta = append(meta, strconv.Itoa(track.Year))
+		}
+		meta = append(meta, formatDuration(track.DurationSeconds))
+
+		body.WriteString(fmt.Sprintf(
+			"%d. <a href=\"%s\">%s</a>\n   <i>%s</i>\n",
+			index+1,
+			escapeHTML(track.URL),
+			escapeHTML(track.Title),
+			strings.Join(meta, " · "),
+		))
+	}
+
+	return strings.TrimSpace(body.String()), pages
+}
+
 func formatDuration(total int) string {
 	hours := total / 3600
 	minutes := (total % 3600) / 60

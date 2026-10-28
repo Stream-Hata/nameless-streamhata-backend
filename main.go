@@ -513,13 +513,8 @@ func main() {
 		}
 
 		return fmt.Sprintf("В эфире, зрителей: %d, с %s", viewers, started)
-	}, func() string {
-		track := musicService.Current()
-		if track == nil {
-			return "Сейчас ничего не играет"
-		}
-
-		return track.Title + " — " + track.URL
+	}, func(page int) (string, int) {
+		return musicService.TelegramPage(page, 10)
 	})
 
 	// Конвейер чата: активность таймеров, команды, модерация, баллы, игры.
