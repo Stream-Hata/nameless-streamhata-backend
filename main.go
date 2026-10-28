@@ -247,6 +247,47 @@ func main() {
 
 	actioner := commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService, quotes: quotesService, sync: syncService, commands: commandsService}
 	commandsService.SetActioner(actioner)
+	diceFormula := func(value string, message twitch.TwitchChatMessage) string {
+		raw := strings.ToLower(strings.TrimSpace(value))
+		if fields := strings.Fields(message.Text); len(fields) > 1 {
+			raw = strings.ToLower(strings.TrimSpace(fields[1]))
+		}
+		count, sides := 1, 6
+		if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err != nil {
+			if _, err := fmt.Sscanf(raw, "d%d", &sides); err != nil {
+				return "1d6"
+			}
+		}
+		if count < 1 || count > 20 || sides < 1 || sides > 1000 {
+			return "1d6"
+		}
+		return raw
+	}
+	diceFormulaBound := func(value string, message twitch.TwitchChatMessage) string {
+		raw := strings.ToLower(strings.TrimSpace(value))
+		count, sides := 1, 6
+		if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err == nil && count >= 1 && count <= 20 && sides >= 1 && sides <= 1000 {
+			return raw
+		}
+		if _, err := fmt.Sscanf(raw, "d%d", &sides); err == nil && sides >= 1 && sides <= 1000 {
+			return raw
+		}
+
+		return diceFormula(value, message)
+	}
+	rollDiceFormula := func(formula string) int {
+		count, sides := 1, 6
+		if _, err := fmt.Sscanf(formula, "%dd%d", &count, &sides); err != nil {
+			if _, err := fmt.Sscanf(formula, "d%d", &sides); err != nil {
+				count, sides = 1, 6
+			}
+		}
+		total := 0
+		for i := 0; i < count; i++ {
+			total += rand.Intn(sides) + 1
+		}
+		return total
+	}
 	commandsService.SetVariableResolver(func(name, value string, message twitch.TwitchChatMessage) string {
 		switch name {
 		case "lastmusic", "lasttrack", "np", "now":
@@ -279,21 +320,17 @@ func main() {
 				return clean[rand.Intn(len(clean))]
 			}
 			return strconv.Itoa(rand.Intn(100) + 1)
+		case "dice.name", "dicename":
+			return diceFormula(value, message)
+		case "dice.result", "number":
+			formula := diceFormulaBound(value, message)
+			if state := syncService.GetDice(); state.Formula == formula && time.Since(state.RolledAt) < 5*time.Second {
+				return strconv.Itoa(state.Result)
+			}
+
+			return strconv.Itoa(rollDiceFormula(formula))
 		case "dice":
-			count, sides := 1, 6
-			if _, err := fmt.Sscanf(strings.ToLower(strings.TrimSpace(value)), "%dd%d", &count, &sides); err != nil {
-				if _, err := fmt.Sscanf(strings.ToLower(strings.TrimSpace(value)), "d%d", &sides); err != nil {
-					count, sides = 1, 6
-				}
-			}
-			if count < 1 || count > 20 || sides < 1 || sides > 1000 {
-				count, sides = 1, 6
-			}
-			total := 0
-			for i := 0; i < count; i++ {
-				total += rand.Intn(sides) + 1
-			}
-			return strconv.Itoa(total)
+			return strconv.Itoa(rollDiceFormula(diceFormulaBound(value, message)))
 		case "coinflip":
 			if rand.Intn(2) == 0 {
 				return "орёл"

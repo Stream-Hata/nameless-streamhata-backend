@@ -166,3 +166,29 @@ func TestExpandSelfReferenceDoesNotLoop(t *testing.T) {
 		t.Fatalf("self reference must not disappear: %q", text)
 	}
 }
+
+func TestReplyExpandsVariables(t *testing.T) {
+	writer := &fakeWriter{}
+	service := New(writer, nil)
+	service.custom["fdate"] = Variable{Name: "fdate", Value: "12.03.2024"}
+	service.variables = func(name, value string, message twitch.TwitchChatMessage) string {
+		return ""
+	}
+
+	_, err := service.Upsert(Command{
+		Name:      "follow",
+		Response:  "fallback",
+		Reply:     "ты зафолловился ${fdate}",
+		UserLevel: "everyone",
+		Enabled:   true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	service.HandleMessage(message("1", "Иван", "!follow"))
+
+	if len(writer.messages) != 1 || !strings.Contains(writer.messages[0], "12.03.2024") {
+		t.Fatalf("reply variable was not expanded: %v", writer.messages)
+	}
+}

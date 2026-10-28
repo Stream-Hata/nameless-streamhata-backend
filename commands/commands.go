@@ -434,6 +434,34 @@ func (s *Service) expandDepth(text string, message twitch.TwitchChatMessage, dep
 	})
 }
 
+func diceArgument(message twitch.TwitchChatMessage) string {
+	fields := strings.Fields(message.Text)
+	if len(fields) > 1 {
+		return fields[1]
+	}
+
+	return ""
+}
+
+func isDiceCommand(command Command, message twitch.TwitchChatMessage) bool {
+	fields := strings.Fields(message.Text)
+	if len(fields) == 0 {
+		return false
+	}
+
+	if normalizeName(command.Name) == "dice" {
+		return true
+	}
+
+	for _, alias := range command.Aliases {
+		if normalizeName(alias) == "dice" {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string) {
 	defer func() { s.sendReply(command, message, response) }()
 
@@ -451,6 +479,12 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 	case "command.run":
 		s.runByName(strings.TrimSpace(command.Response), message)
 		return
+	}
+
+	if command.Action == "say" && isDiceCommand(command, message) {
+		if advanced, ok := s.actioner.(AdvancedActioner); ok {
+			_, _, _ = advanced.Perform(context.Background(), "dice", diceArgument(message), message)
+		}
 	}
 
 	if advanced, ok := s.actioner.(AdvancedActioner); ok && isAdvancedAction(command.Action) {
@@ -623,9 +657,9 @@ func (s *Service) runByName(raw string, message twitch.TwitchChatMessage) {
 }
 
 func (s *Service) sendReply(command Command, message twitch.TwitchChatMessage, response string) {
-	reply := strings.TrimSpace(command.Reply)
+	reply := strings.TrimSpace(s.expand(command.Reply, message))
 	if reply == "" {
-		reply = response
+		reply = strings.TrimSpace(s.expand(response, message))
 	}
 
 	if s.writer == nil || reply == "" {
