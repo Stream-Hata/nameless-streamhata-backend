@@ -57,7 +57,7 @@ type AdvancedActioner interface {
 	Perform(ctx context.Context, action, value string, message twitch.TwitchChatMessage) (string, error, bool)
 }
 
-type VariableResolver func(name string) string
+type VariableResolver func(name, value string, message twitch.TwitchChatMessage) string
 
 type Variable struct {
 	ID     string `json:"id"`
@@ -367,7 +367,7 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 	s.mu.Unlock()
 
 	s.persist(*command)
-	s.execute(*command, message, s.expand(response))
+	s.execute(*command, message, s.expand(response, message))
 }
 
 func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
@@ -381,7 +381,7 @@ func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
 		snapshot := *command
 		response := render(snapshot.Response, message, snapshot.Counter+1)
 		s.mu.Unlock()
-		s.execute(snapshot, message, s.expand(response))
+		s.execute(snapshot, message, s.expand(response, message))
 
 		return true
 	}
@@ -393,7 +393,7 @@ func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
 
 var variablePattern = regexp.MustCompile(`\$\(([a-z]+)\)`)
 
-func (s *Service) expand(text string) string {
+func (s *Service) expand(text string, message twitch.TwitchChatMessage) string {
 	if text == "" {
 		return text
 	}
@@ -407,18 +407,18 @@ func (s *Service) expand(text string) string {
 
 		if ok {
 			if variable.Action != "" && s.variables != nil {
-				if value := s.variables(variable.Action); value != "" {
+				if value := s.variables(variable.Action, variable.Value, message); value != "" {
 					return value
 				}
 			}
 
 			if variable.Value != "" {
-				return s.expand(variable.Value)
+				return s.expand(variable.Value, message)
 			}
 		}
 
 		if s.variables != nil {
-			if value := s.variables(name); value != "" {
+			if value := s.variables(name, "", message); value != "" {
 				return value
 			}
 		}
@@ -461,7 +461,7 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 			}
 
 			if text != "" && s.writer != nil {
-				_ = s.writer.Say(s.expand(text))
+				_ = s.writer.Say(s.expand(text, message))
 			}
 
 			command.Reply = ""
@@ -512,7 +512,7 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 			}
 		case "lastmusic":
 			if s.writer != nil {
-				_ = s.writer.Say(s.expand("Сейчас играет: $(lastmusic)"))
+				_ = s.writer.Say(s.expand("Сейчас играет: $(lastmusic)", message))
 			}
 
 			return

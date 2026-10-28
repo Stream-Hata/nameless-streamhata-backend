@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/p7x-dev/nameless-streamhata-backend/access"
@@ -246,7 +247,7 @@ func main() {
 
 	actioner := commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService, quotes: quotesService, sync: syncService, commands: commandsService}
 	commandsService.SetActioner(actioner)
-	commandsService.SetVariableResolver(func(name string) string {
+	commandsService.SetVariableResolver(func(name, value string, message twitch.TwitchChatMessage) string {
 		switch name {
 		case "lastmusic", "lasttrack", "np", "now":
 			track := musicService.Current()
@@ -258,6 +259,54 @@ func main() {
 			if track != nil {
 				return track.URL
 			}
+		case "date":
+			return time.Now().Format("02.01.2006")
+		case "time":
+			return time.Now().Format("15:04")
+		case "datetime":
+			return time.Now().Format("02.01.2006 15:04")
+		case "timestamp":
+			return strconv.FormatInt(time.Now().Unix(), 10)
+		case "random":
+			options := strings.Split(value, "|")
+			clean := options[:0]
+			for _, item := range options {
+				if item = strings.TrimSpace(item); item != "" {
+					clean = append(clean, item)
+				}
+			}
+			if len(clean) > 0 {
+				return clean[rand.Intn(len(clean))]
+			}
+			return strconv.Itoa(rand.Intn(100) + 1)
+		case "dice":
+			count, sides := 1, 6
+			if _, err := fmt.Sscanf(strings.ToLower(strings.TrimSpace(value)), "%dd%d", &count, &sides); err != nil {
+				if _, err := fmt.Sscanf(strings.ToLower(strings.TrimSpace(value)), "d%d", &sides); err != nil {
+					count, sides = 1, 6
+				}
+			}
+			if count < 1 || count > 20 || sides < 1 || sides > 1000 {
+				count, sides = 1, 6
+			}
+			total := 0
+			for i := 0; i < count; i++ {
+				total += rand.Intn(sides) + 1
+			}
+			return strconv.Itoa(total)
+		case "coinflip":
+			if rand.Intn(2) == 0 {
+				return "орёл"
+			}
+			return "решка"
+		case "points.balance":
+			return pointsService.BalanceText(message)
+		case "points.top":
+			return pointsService.TopText()
+		case "points.shop":
+			return pointsService.ShopText()
+		case "twitch.followage", "twitch.accountage", "twitch.uptime", "twitch.viewers", "twitch.title", "twitch.game", "twitch.followers", "twitch.subscribers", "twitch.chatters":
+			return actioner.Twitch(context.Background(), name, message.Author.ID)
 		}
 
 		return ""
