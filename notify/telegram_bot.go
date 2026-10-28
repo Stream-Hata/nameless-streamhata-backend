@@ -14,6 +14,7 @@ import (
 type TelegramUpdate struct {
 	UpdateID      int64                  `json:"update_id"`
 	Message       *TelegramMessage       `json:"message"`
+	ChannelPost   *TelegramMessage       `json:"channel_post"`
 	CallbackQuery *TelegramCallbackQuery `json:"callback_query"`
 }
 
@@ -38,11 +39,12 @@ type TelegramCallbackQuery struct {
 // TelegramUpdates long-polls getUpdates for the configured bot.
 func (s *Service) TelegramUpdates(ctx context.Context, offset int64) ([]TelegramUpdate, int64, error) {
 	settings := s.GetSettings()
-	if settings.TelegramToken == "" {
+	token := strings.TrimSpace(settings.TelegramToken)
+	if token == "" {
 		return nil, offset, fmt.Errorf("telegram token не задан")
 	}
 
-	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=1&limit=20", settings.TelegramToken)
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=1&limit=20", token)
 	if offset > 0 {
 		endpoint += "&offset=" + strconv.FormatInt(offset, 10)
 	}
@@ -78,6 +80,7 @@ func (s *Service) TelegramUpdates(ctx context.Context, offset int64) ([]Telegram
 }
 
 func (s *Service) TelegramBotLoop(ctx context.Context, status func() string, music func(page int) (string, int)) {
+	s.deleteTelegramWebhook(ctx)
 	var offset int64
 	for {
 		select {
@@ -105,29 +108,33 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 		s.handleTelegramCallback(ctx, update.CallbackQuery, music)
 		return
 	}
-	if update.Message == nil {
+	message := update.Message
+	if message == nil {
+		message = update.ChannelPost
+	}
+	if message == nil {
 		return
 	}
-	settings := s.GetSettings()
-	if settings.TelegramChatID == "" || strconv.FormatInt(update.Message.Chat.ID, 10) != settings.TelegramChatID {
+	chatID := strconv.FormatInt(message.Chat.ID, 10)
+	if !s.isTelegramChat(chatID) {
 		return
 	}
 
-	text := strings.TrimSpace(update.Message.Text)
-	userName := "друг"
-	if update.Message.From != nil {
-		if update.Message.From.Username != "" {
-			userName = "@" + update.Message.From.Username
-		} else if update.Message.From.FirstName != "" {
-			userName = update.Message.From.FirstName
+	text := strings.TrimSpace(message.Text)
+	userName := "канал"
+	if message.From != nil {
+		if message.From.Username != "" {
+			userName = "@" + message.From.Username
+		} else if message.From.FirstName != "" {
+			userName = message.From.FirstName
 		}
 	}
 	if custom, buttons, ok := s.matchTelegramCommand(text, userName); ok {
 		var err error
 		if len(buttons) > 0 {
-			err = s.SendTelegramButtons(ctx, custom, buttons)
+			err = s.SendTelegramButtonsTo(ctx, chatID, custom, buttons)
 		} else {
-			err = s.SendTelegramText(ctx, custom)
+			err = s.SendTelegramTextTo(ctx, chatID, custom)
 		}
 		if err != nil {
 			log.Printf("[Telegram] custom command %q failed: %v", commandName(text), err)
@@ -158,7 +165,7 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 			if requested >= pages {
 				requested = pages - 1
 			}
-			_ = s.sendTelegramPage(ctx, page, pages, requested)
+			_ = s.sendTelegramPageTo(ctx, chatID, page, pages, requested)
 
 			return
 		}
@@ -168,7 +175,7 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 		return
 	}
 	if reply != "" {
-		if err := s.SendTelegramText(ctx, reply); err != nil {
+		if err := s.SendTelegramTextTo(ctx, chatID, reply); err != nil {
 			log.Printf("[Telegram] command %q failed: %v", command, err)
 		}
 	}
@@ -179,9 +186,8 @@ func (s *Service) handleTelegramCallback(ctx context.Context, query *TelegramCal
 		return
 	}
 
-	settings := s.GetSettings()
 	chatID := strconv.FormatInt(query.Message.Chat.ID, 10)
-	if settings.TelegramChatID == "" || chatID != settings.TelegramChatID {
+	if !s.isTelegramChat(chatID) {
 		return
 	}
 
@@ -200,7 +206,7 @@ func (s *Service) handleTelegramCallback(ctx context.Context, query *TelegramCal
 	if page >= pages {
 		page = pages - 1
 	}
-	_ = s.editTelegramPage(ctx, query.Message.MessageID, text, pages, page)
+	_ = s.editTelegramPageTo(ctx, chatID, query.Message.MessageID, text, pages, page)
 }
 
 func (s *Service) telegramKeyboard(page, pages int) map[string]any {
@@ -222,17 +228,18 @@ func (s *Service) telegramKeyboard(page, pages int) map[string]any {
 }
 
 func (s *Service) SendTelegramPage(ctx context.Context, text string, page, pages int) error {
-	return s.sendTelegramPage(ctx, text, pages, page)
+	settings := s.GetSettings()
+	return s.sendTelegramPageTo(ctx, settings.TelegramChatID, text, pages, page)
 }
 
-func (s *Service) sendTelegramPage(ctx context.Context, text string, pages, page int) error {
+func (s *Service) sendTelegramPageTo(ctx context.Context, chatID, text string, pages, page int) error {
 	settings := s.GetSettings()
-	if settings.TelegramToken == "" || settings.TelegramChatID == "" {
+	if settings.TelegramToken == "" || chatID == "" {
 		return fmt.Errorf("telegram не настроен: укажите token и chat id")
 	}
 
 	payload := map[string]any{
-		"chat_id":                  settings.TelegramChatID,
+		"chat_id":                  chatID,
 		"text":                     text,
 		"parse_mode":               "MarkdownV2",
 		"disable_web_page_preview": true,
@@ -242,14 +249,14 @@ func (s *Service) sendTelegramPage(ctx context.Context, text string, pages, page
 	return s.callTelegram(ctx, settings.TelegramToken, "sendMessage", payload)
 }
 
-func (s *Service) editTelegramPage(ctx context.Context, messageID int64, text string, pages, page int) error {
+func (s *Service) editTelegramPageTo(ctx context.Context, chatID string, messageID int64, text string, pages, page int) error {
 	settings := s.GetSettings()
-	if settings.TelegramToken == "" || settings.TelegramChatID == "" {
+	if settings.TelegramToken == "" || chatID == "" {
 		return fmt.Errorf("telegram не настроен: укажите token и chat id")
 	}
 
 	payload := map[string]any{
-		"chat_id":                  settings.TelegramChatID,
+		"chat_id":                  chatID,
 		"message_id":               messageID,
 		"text":                     text,
 		"parse_mode":               "MarkdownV2",
@@ -315,9 +322,23 @@ func commandName(text string) string {
 	return fields[0]
 }
 
+func (s *Service) SendTelegramTextTo(ctx context.Context, chatID, text string) error {
+	settings := s.GetSettings()
+	if settings.TelegramToken == "" || chatID == "" {
+		return fmt.Errorf("telegram не настроен: укажите token и chat id")
+	}
+
+	return s.sendTelegram(ctx, settings.TelegramToken, chatID, text)
+}
+
 func (s *Service) SendTelegramButtons(ctx context.Context, text string, buttons []TelegramButton) error {
 	settings := s.GetSettings()
-	if settings.TelegramToken == "" || settings.TelegramChatID == "" {
+	return s.SendTelegramButtonsTo(ctx, settings.TelegramChatID, text, buttons)
+}
+
+func (s *Service) SendTelegramButtonsTo(ctx context.Context, chatID, text string, buttons []TelegramButton) error {
+	settings := s.GetSettings()
+	if settings.TelegramToken == "" || chatID == "" {
 		return fmt.Errorf("telegram не настроен: укажите token и chat id")
 	}
 
@@ -330,11 +351,32 @@ func (s *Service) SendTelegramButtons(ctx context.Context, text string, buttons 
 	}
 
 	payload := map[string]any{
-		"chat_id":                  settings.TelegramChatID,
+		"chat_id":                  chatID,
 		"text":                     text,
 		"disable_web_page_preview": true,
 		"reply_markup":             map[string]any{"inline_keyboard": rows},
 	}
 
 	return s.callTelegram(ctx, settings.TelegramToken, "sendMessage", payload)
+}
+
+func (s *Service) deleteTelegramWebhook(ctx context.Context) {
+	settings := s.GetSettings()
+	token := strings.TrimSpace(settings.TelegramToken)
+	if token == "" {
+		return
+	}
+
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/deleteWebhook", token)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return
+	}
+	response, err := s.http.Do(request)
+	if err != nil {
+		log.Printf("[Telegram] deleteWebhook failed: %v", err)
+
+		return
+	}
+	_ = response.Body.Close()
 }

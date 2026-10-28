@@ -31,6 +31,7 @@ type Command struct {
 	Reply           string    `json:"reply"`
 	LimitReply      string    `json:"limitReply"`
 	LineBreaks      bool      `json:"lineBreaks"`
+	SingleMessage   bool      `json:"singleMessage"`
 	CooldownSeconds int       `json:"cooldownSeconds"`
 	UserLevel       string    `json:"userLevel"`
 	Enabled         bool      `json:"enabled"`
@@ -737,6 +738,28 @@ func (s *Service) runByName(raw string, message twitch.TwitchChatMessage) {
 	}
 }
 
+func singleMessageWithBreaks(text string, limit int) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	parts := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			parts = append(parts, line)
+		}
+	}
+
+	text = strings.Join(parts, " • ")
+	runes := []rune(text)
+
+	if len(runes) <= limit {
+		return text
+	}
+
+	return string(runes[:limit-1]) + "…"
+}
+
 func singleChatMessage(text string, limit int) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.Join(strings.Fields(text), " ")
@@ -764,7 +787,13 @@ func (s *Service) sendReply(command Command, message twitch.TwitchChatMessage, r
 		reply = mention + ", " + reply
 	}
 
-	if command.LineBreaks && strings.Contains(reply, "\n") {
+	if strings.Contains(reply, "\n") {
+		if command.SingleMessage {
+			_ = s.writer.Say(singleMessageWithBreaks(reply, 500))
+
+			return
+		}
+
 		lines := strings.Split(strings.ReplaceAll(reply, "\r\n", "\n"), "\n")
 		for _, line := range lines {
 			line = strings.TrimSpace(line)

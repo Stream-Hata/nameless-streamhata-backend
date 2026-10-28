@@ -16,15 +16,16 @@ import (
 
 // Settings — куда и о чём слать уведомления.
 type Settings struct {
-	Enabled         bool   `json:"enabled"`
-	DiscordWebhook  string `json:"discordWebhook"`
-	TelegramToken   string `json:"telegramToken"`
-	TelegramChatID  string `json:"telegramChatId"`
-	OnStreamOnline  bool   `json:"onStreamOnline"`
-	OnStreamOffline bool   `json:"onStreamOffline"`
-	OnAlerts        bool   `json:"onAlerts"`
-	OnDonations     bool   `json:"onDonations"`
-	Digest          bool   `json:"digest"`
+	Enabled         bool     `json:"enabled"`
+	DiscordWebhook  string   `json:"discordWebhook"`
+	TelegramToken   string   `json:"telegramToken"`
+	TelegramChatID  string   `json:"telegramChatId"`
+	TelegramChatIDs []string `json:"telegramChatIds"`
+	OnStreamOnline  bool     `json:"onStreamOnline"`
+	OnStreamOffline bool     `json:"onStreamOffline"`
+	OnAlerts        bool     `json:"onAlerts"`
+	OnDonations     bool     `json:"onDonations"`
+	Digest          bool     `json:"digest"`
 }
 
 func defaultSettings() Settings {
@@ -118,11 +119,62 @@ func (s *Service) GetSettings() Settings {
 
 func (s *Service) SetSettings(settings Settings) Settings {
 	s.mu.Lock()
+	if settings.TelegramChatIDs == nil {
+		settings.TelegramChatIDs = s.settings.TelegramChatIDs
+	}
+	if len(settings.TelegramChatIDs) == 0 && strings.TrimSpace(settings.TelegramChatID) != "" {
+		settings.TelegramChatIDs = []string{strings.TrimSpace(settings.TelegramChatID)}
+	}
+	settings.TelegramChatIDs = uniqueChatIDs(settings.TelegramChatIDs)
+	if len(settings.TelegramChatIDs) > 0 {
+		settings.TelegramChatID = settings.TelegramChatIDs[0]
+	}
 	s.settings = settings
 	s.mu.Unlock()
 	s.persist()
 
 	return s.GetSettings()
+}
+
+func uniqueChatIDs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+
+	return result
+}
+
+func (s *Service) telegramChatIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids := uniqueChatIDs(s.settings.TelegramChatIDs)
+	if len(ids) == 0 && strings.TrimSpace(s.settings.TelegramChatID) != "" {
+		ids = []string{strings.TrimSpace(s.settings.TelegramChatID)}
+	}
+
+	return ids
+}
+
+func (s *Service) isTelegramChat(chatID string) bool {
+	for _, id := range s.telegramChatIDs() {
+		if id == chatID {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *Service) load() {
@@ -137,6 +189,9 @@ func (s *Service) load() {
 
 	var settings Settings
 	if json.Unmarshal(raw, &settings) == nil {
+		if len(settings.TelegramChatIDs) == 0 && strings.TrimSpace(settings.TelegramChatID) != "" {
+			settings.TelegramChatIDs = []string{strings.TrimSpace(settings.TelegramChatID)}
+		}
 		s.settings = settings
 	}
 }
@@ -170,9 +225,11 @@ func (s *Service) Send(ctx context.Context, text string) {
 		}
 	}
 
-	if settings.TelegramToken != "" && settings.TelegramChatID != "" {
-		if err := s.sendTelegram(ctx, settings.TelegramToken, settings.TelegramChatID, text); err != nil {
-			_ = err
+	if settings.TelegramToken != "" {
+		for _, chatID := range s.telegramChatIDs() {
+			if err := s.sendTelegram(ctx, settings.TelegramToken, chatID, text); err != nil {
+				_ = err
+			}
 		}
 	}
 }
