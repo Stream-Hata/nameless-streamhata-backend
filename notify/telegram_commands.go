@@ -12,11 +12,15 @@ import (
 
 // TelegramCommand — настраиваемая команда Telegram-бота.
 type TelegramCommand struct {
-	ID       string           `json:"id"`
-	Command  string           `json:"command"`
-	Response string           `json:"response"`
-	Enabled  bool             `json:"enabled"`
-	Buttons  []TelegramButton `json:"buttons,omitempty"`
+	ID             string           `json:"id"`
+	Command        string           `json:"command"`
+	Aliases        []string         `json:"aliases,omitempty"`
+	Description    string           `json:"description,omitempty"`
+	Response       string           `json:"response"`
+	ParseMode      string           `json:"parseMode,omitempty"`
+	DisablePreview bool             `json:"disablePreview,omitempty"`
+	Enabled        bool             `json:"enabled"`
+	Buttons        []TelegramButton `json:"buttons,omitempty"`
 }
 
 type TelegramButton struct {
@@ -114,10 +118,10 @@ func (s *Service) DeleteTelegramCommand(id string) bool {
 	return false
 }
 
-func (s *Service) matchTelegramCommand(text, userName string) (string, []TelegramButton, bool) {
+func (s *Service) matchTelegramCommand(text, userName string) (TelegramCommand, string, bool) {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
-		return "", nil, false
+		return TelegramCommand{}, "", false
 	}
 
 	name := strings.ToLower(fields[0])
@@ -127,7 +131,7 @@ func (s *Service) matchTelegramCommand(text, userName string) (string, []Telegra
 	defer s.mu.Unlock()
 
 	for _, command := range s.telegramCommands {
-		if !command.Enabled || strings.ToLower(command.Command) != name {
+		if !command.Enabled || !matchesTelegramCommand(command, name) {
 			continue
 		}
 
@@ -139,10 +143,10 @@ func (s *Service) matchTelegramCommand(text, userName string) (string, []Telegra
 			"{time}", time.Now().Format("15:04"),
 		).Replace(command.Response)
 
-		return response, command.Buttons, true
+		return command, response, true
 	}
 
-	return "", nil, false
+	return TelegramCommand{}, "", false
 }
 
 func registerTelegramCommandRoutes(srv Deps, service *Service) {
@@ -190,3 +194,21 @@ var errTelegramCommandName = &telegramCommandError{"command is required"}
 type telegramCommandError struct{ text string }
 
 func (e *telegramCommandError) Error() string { return e.text }
+
+func matchesTelegramCommand(command TelegramCommand, name string) bool {
+	if strings.ToLower(command.Command) == name {
+		return true
+	}
+
+	for _, alias := range command.Aliases {
+		alias = strings.TrimSpace(strings.ToLower(alias))
+		if alias != "" && !strings.HasPrefix(alias, "/") {
+			alias = "/" + alias
+		}
+		if alias == name {
+			return true
+		}
+	}
+
+	return false
+}

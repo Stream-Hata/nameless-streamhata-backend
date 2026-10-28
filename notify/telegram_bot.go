@@ -18,12 +18,17 @@ type TelegramUpdate struct {
 	CallbackQuery *TelegramCallbackQuery `json:"callback_query"`
 }
 
+type TelegramChat struct {
+	ID       int64  `json:"id"`
+	Title    string `json:"title"`
+	Username string `json:"username"`
+	Type     string `json:"type"`
+}
+
 type TelegramMessage struct {
-	MessageID int64 `json:"message_id"`
-	Chat      struct {
-		ID int64 `json:"id"`
-	} `json:"chat"`
-	From *struct {
+	MessageID int64        `json:"message_id"`
+	Chat      TelegramChat `json:"chat"`
+	From      *struct {
 		Username  string `json:"username"`
 		FirstName string `json:"first_name"`
 	} `json:"from"`
@@ -105,6 +110,9 @@ func (s *Service) TelegramBotLoop(ctx context.Context, status func() string, mus
 
 func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdate, status func() string, music func(page int) (string, int)) {
 	if update.CallbackQuery != nil {
+		if update.CallbackQuery.Message != nil {
+			s.recordTelegramChat(update.CallbackQuery.Message.Chat)
+		}
 		s.handleTelegramCallback(ctx, update.CallbackQuery, music)
 		return
 	}
@@ -115,8 +123,9 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 	if message == nil {
 		return
 	}
+	s.recordTelegramChat(message.Chat)
 	chatID := strconv.FormatInt(message.Chat.ID, 10)
-	if !s.isTelegramChat(chatID) {
+	if !s.isTelegramChat(message.Chat) {
 		return
 	}
 
@@ -129,14 +138,8 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 			userName = message.From.FirstName
 		}
 	}
-	if custom, buttons, ok := s.matchTelegramCommand(text, userName); ok {
-		var err error
-		if len(buttons) > 0 {
-			err = s.SendTelegramButtonsTo(ctx, chatID, custom, buttons)
-		} else {
-			err = s.SendTelegramTextTo(ctx, chatID, custom)
-		}
-		if err != nil {
+	if command, custom, ok := s.matchTelegramCommand(text, userName); ok {
+		if err := s.SendTelegramCommandTo(ctx, chatID, custom, command.Buttons, command.ParseMode, command.DisablePreview); err != nil {
 			log.Printf("[Telegram] custom command %q failed: %v", commandName(text), err)
 		}
 
@@ -187,7 +190,7 @@ func (s *Service) handleTelegramCallback(ctx context.Context, query *TelegramCal
 	}
 
 	chatID := strconv.FormatInt(query.Message.Chat.ID, 10)
-	if !s.isTelegramChat(chatID) {
+	if !s.isTelegramChat(query.Message.Chat) {
 		return
 	}
 
@@ -331,6 +334,34 @@ func (s *Service) SendTelegramTextTo(ctx context.Context, chatID, text string) e
 	return s.sendTelegram(ctx, settings.TelegramToken, chatID, text)
 }
 
+func (s *Service) SendTelegramCommandTo(ctx context.Context, chatID, text string, buttons []TelegramButton, parseMode string, disablePreview bool) error {
+	settings := s.GetSettings()
+	if settings.TelegramToken == "" || chatID == "" {
+		return fmt.Errorf("telegram не настроен: укажите token и chat id")
+	}
+
+	payload := map[string]any{
+		"chat_id":                  chatID,
+		"text":                     text,
+		"disable_web_page_preview": disablePreview,
+	}
+	if parseMode == "HTML" || parseMode == "MarkdownV2" {
+		payload["parse_mode"] = parseMode
+	}
+	if len(buttons) > 0 {
+		rows := make([][]map[string]string, 0, len(buttons))
+		for _, button := range buttons {
+			if strings.TrimSpace(button.Text) == "" || !strings.HasPrefix(button.URL, "http") {
+				continue
+			}
+			rows = append(rows, []map[string]string{{"text": button.Text, "url": button.URL}})
+		}
+		payload["reply_markup"] = map[string]any{"inline_keyboard": rows}
+	}
+
+	return s.callTelegram(ctx, settings.TelegramToken, "sendMessage", payload)
+}
+
 func (s *Service) SendTelegramButtons(ctx context.Context, text string, buttons []TelegramButton) error {
 	settings := s.GetSettings()
 	return s.SendTelegramButtonsTo(ctx, settings.TelegramChatID, text, buttons)
@@ -379,4 +410,26 @@ func (s *Service) deleteTelegramWebhook(ctx context.Context) {
 		return
 	}
 	_ = response.Body.Close()
+}
+
+func (s *Service) recordTelegramChat(chat TelegramChat) {
+	if chat.ID == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	s.telegramChats[chat.ID] = chat
+	s.mu.Unlock()
+}
+
+func (s *Service) TelegramChatsSeen() []TelegramChat {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	chats := make([]TelegramChat, 0, len(s.telegramChats))
+	for _, chat := range s.telegramChats {
+		chats = append(chats, chat)
+	}
+
+	return chats
 }

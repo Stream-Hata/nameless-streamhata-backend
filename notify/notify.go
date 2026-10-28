@@ -43,15 +43,17 @@ type Service struct {
 	mu               sync.Mutex
 	settings         Settings
 	telegramCommands []TelegramCommand
+	telegramChats    map[int64]TelegramChat
 	http             *http.Client
 	db               *sql.DB
 }
 
 func New(db *sql.DB) *Service {
 	service := &Service{
-		settings: defaultSettings(),
-		http:     netcfg.NewHTTPClient(15 * time.Second),
-		db:       db,
+		settings:      defaultSettings(),
+		telegramChats: make(map[int64]TelegramChat),
+		http:          netcfg.NewHTTPClient(15 * time.Second),
+		db:            db,
 	}
 	service.load()
 	service.loadTelegramCommands()
@@ -167,14 +169,10 @@ func (s *Service) telegramChatIDs() []string {
 	return ids
 }
 
-func (s *Service) isTelegramChat(chatID string) bool {
-	for _, id := range s.telegramChatIDs() {
-		if id == chatID {
-			return true
-		}
-	}
-
-	return false
+func (s *Service) isTelegramChat(chat TelegramChat) bool {
+	// Бот отвечает в любом чате, куда его добавили. Список chat ID
+	// используется только для исходящих уведомлений.
+	return chat.ID != 0
 }
 
 func (s *Service) load() {
@@ -256,63 +254,25 @@ func (s *Service) Test(ctx context.Context) error {
 	return s.sendTelegram(ctx, settings.TelegramToken, settings.TelegramChatID, "JuryKit: тестовое уведомление — канал связи работает")
 }
 
-// TelegramChats returns chats seen by the bot via getUpdates.
+// TelegramChats returns chats the bot has seen in incoming updates.
 func (s *Service) TelegramChats(ctx context.Context) ([]map[string]any, error) {
+	_ = ctx
 	settings := s.GetSettings()
 	if settings.TelegramToken == "" {
 		return nil, fmt.Errorf("укажите Telegram bot token")
 	}
 
-	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?limit=100", settings.TelegramToken)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	response, err := s.http.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = response.Body.Close() }()
-
-	if response.StatusCode >= 300 {
-		return nil, fmt.Errorf("telegram getUpdates returned %d", response.StatusCode)
-	}
-
-	var payload struct {
-		Result []struct {
-			Message *struct {
-				Chat struct {
-					ID       int64  `json:"id"`
-					Title    string `json:"title"`
-					Username string `json:"username"`
-					Type     string `json:"type"`
-				} `json:"chat"`
-			} `json:"message"`
-		} `json:"result"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		return nil, err
-	}
-
-	seen := make(map[int64]map[string]any)
-	for _, update := range payload.Result {
-		if update.Message == nil || update.Message.Chat.ID == 0 {
-			continue
-		}
-		chat := update.Message.Chat
-		seen[chat.ID] = map[string]any{
+	chats := s.TelegramChatsSeen()
+	result := make([]map[string]any, 0, len(chats))
+	for _, chat := range chats {
+		result = append(result, map[string]any{
 			"id":       chat.ID,
 			"title":    chat.Title,
 			"username": chat.Username,
 			"type":     chat.Type,
-		}
+		})
 	}
 
-	result := make([]map[string]any, 0, len(seen))
-	for _, chat := range seen {
-		result = append(result, chat)
-	}
 	return result, nil
 }
 
