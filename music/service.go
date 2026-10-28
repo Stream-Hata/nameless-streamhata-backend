@@ -63,9 +63,10 @@ type Service struct {
 	current string
 	enabled bool
 
-	db       *sql.DB
-	fetcher  Fetcher
-	telegram TelegramSender
+	db           *sql.DB
+	fetcher      Fetcher
+	telegram     TelegramSender
+	telegramPage TelegramPageSender
 }
 
 func NewService(db *sql.DB) *Service {
@@ -474,6 +475,15 @@ func (s *Service) loadFromDB() {
 // TelegramSender отправляет текст в Telegram (реализуется notify).
 type TelegramSender func(ctx context.Context, text string) error
 
+type TelegramPageSender func(ctx context.Context, text string, page, pages int) error
+
+func (s *Service) SetTelegramPageSender(sender TelegramPageSender) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.telegramPage = sender
+}
+
 func (s *Service) SetTelegramSender(sender TelegramSender) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -481,11 +491,21 @@ func (s *Service) SetTelegramSender(sender TelegramSender) {
 	s.telegram = sender
 }
 
-// ExportToTelegram выгружает трек-лист в Telegram (HTML, по 20 треков).
+// ExportToTelegram выгружает трек-лист в Telegram одной страницей.
 func (s *Service) ExportToTelegram(ctx context.Context) (int, error) {
 	s.mu.RLock()
+	pageSender := s.telegramPage
 	sender := s.telegram
 	s.mu.RUnlock()
+
+	if pageSender != nil {
+		text, pages := s.TelegramPage(0, 10)
+		if err := pageSender(ctx, text, 0, pages); err != nil {
+			return 0, err
+		}
+
+		return 1, nil
+	}
 
 	if sender == nil {
 		return 0, errors.New("Telegram не настроен: заполните токен и chat id в интеграциях")
@@ -597,11 +617,8 @@ func (s *Service) TelegramPage(page, perPage int) (string, int) {
 
 	var body strings.Builder
 
-	body.WriteString("*🎵 Трек-лист Nameless StreamHata*\n")
-	body.WriteString(fmt.Sprintf("_%d треков · %s · стр. %d/%d_\n\n", len(tracks), formatDuration(total), page+1, pages))
-	body.WriteString("```\n")
-	body.WriteString(fmt.Sprintf("%-2s  %-30s %-18s %5s\n", "#", "Трек", "Автор", "Время"))
-	body.WriteString(strings.Repeat("─", 60) + "\n")
+	body.WriteString("*🎵 Трек\\-лист Nameless StreamHata*\n")
+	body.WriteString(fmt.Sprintf("_%d треков · %s · стр %d/%d_\n\n", len(tracks), formatDuration(total), page+1, pages))
 
 	start := page * perPage
 	end := start + perPage
@@ -611,23 +628,55 @@ func (s *Service) TelegramPage(page, perPage int) (string, int) {
 
 	for index := start; index < end; index++ {
 		track := tracks[index]
+		title := track.Title
+		if title == "" {
+			title = track.URL
+		}
+		author := track.Author
+		if author == "" {
+			author = "—"
+		}
 		body.WriteString(fmt.Sprintf(
-			"%-2d  %-30s %-18s %5s\n",
+			"%d\\. [%s](%s) — %s · %s\n",
 			index+1,
-			markdownCode(clipRunes(track.Title, 30)),
-			markdownCode(clipRunes(track.Author, 18)),
+			escapeMarkdownV2(clipRunes(title, 80)),
+			escapeMarkdownURL(track.URL),
+			escapeMarkdownV2(clipRunes(author, 40)),
 			formatDuration(track.DurationSeconds),
 		))
 	}
 
-	body.WriteString("```")
-
-	return body.String(), pages
+	return strings.TrimSpace(body.String()), pages
 }
 
-func markdownCode(value string) string {
-	value = strings.ReplaceAll(value, `\`, `\\`)
-	return strings.ReplaceAll(value, "`", "\\`")
+func escapeMarkdownV2(value string) string {
+	replacer := strings.NewReplacer(
+		"\\", "\\\\",
+		"_", "\\_",
+		"*", "\\*",
+		"[", "\\[",
+		"]", "\\]",
+		"(", "\\(",
+		")", "\\)",
+		"~", "\\~",
+		"`", "\\`",
+		">", "\\>",
+		"#", "\\#",
+		"+", "\\+",
+		"-", "\\-",
+		"=", "\\=",
+		"|", "\\|",
+		"{", "\\{",
+		"}", "\\}",
+		".", "\\.",
+		"!", "\\!",
+	)
+
+	return replacer.Replace(value)
+}
+
+func escapeMarkdownURL(value string) string {
+	return strings.NewReplacer("\\", "\\\\", ")", "\\)", "(", "\\(").Replace(value)
 }
 
 func clipRunes(value string, limit int) string {

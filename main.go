@@ -209,6 +209,7 @@ func main() {
 	notifyService := notify.New(musicDB)
 	notify.RegisterRoutes(srv, notifyService)
 	musicService.SetTelegramSender(notifyService.SendTelegramText)
+	musicService.SetTelegramPageSender(notifyService.SendTelegramPage)
 
 	obsClient := obs.New()
 	obs.RegisterRoutes(srv, obsClient)

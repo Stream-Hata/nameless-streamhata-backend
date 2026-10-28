@@ -12,10 +12,16 @@ import (
 
 // TelegramCommand — настраиваемая команда Telegram-бота.
 type TelegramCommand struct {
-	ID       string `json:"id"`
-	Command  string `json:"command"`
-	Response string `json:"response"`
-	Enabled  bool   `json:"enabled"`
+	ID       string           `json:"id"`
+	Command  string           `json:"command"`
+	Response string           `json:"response"`
+	Enabled  bool             `json:"enabled"`
+	Buttons  []TelegramButton `json:"buttons,omitempty"`
+}
+
+type TelegramButton struct {
+	Text string `json:"text"`
+	URL  string `json:"url"`
 }
 
 func (s *Service) loadTelegramCommands() {
@@ -108,10 +114,10 @@ func (s *Service) DeleteTelegramCommand(id string) bool {
 	return false
 }
 
-func (s *Service) matchTelegramCommand(text, userName string) (string, bool) {
+func (s *Service) matchTelegramCommand(text, userName string) (string, []TelegramButton, bool) {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
-		return "", false
+		return "", nil, false
 	}
 
 	name := strings.ToLower(fields[0])
@@ -133,10 +139,10 @@ func (s *Service) matchTelegramCommand(text, userName string) (string, bool) {
 			"{time}", time.Now().Format("15:04"),
 		).Replace(command.Response)
 
-		return response, true
+		return response, command.Buttons, true
 	}
 
-	return "", false
+	return "", nil, false
 }
 
 func registerTelegramCommandRoutes(srv Deps, service *Service) {

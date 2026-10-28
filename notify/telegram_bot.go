@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -86,6 +87,9 @@ func (s *Service) TelegramBotLoop(ctx context.Context, status func() string, mus
 		}
 
 		updates, next, err := s.TelegramUpdates(ctx, offset)
+		if err != nil {
+			log.Printf("[Telegram] getUpdates failed: %v", err)
+		}
 		if err == nil {
 			offset = next
 			for _, update := range updates {
@@ -118,8 +122,16 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 			userName = update.Message.From.FirstName
 		}
 	}
-	if custom, ok := s.matchTelegramCommand(text, userName); ok {
-		_ = s.SendTelegramText(ctx, custom)
+	if custom, buttons, ok := s.matchTelegramCommand(text, userName); ok {
+		var err error
+		if len(buttons) > 0 {
+			err = s.SendTelegramButtons(ctx, custom, buttons)
+		} else {
+			err = s.SendTelegramText(ctx, custom)
+		}
+		if err != nil {
+			log.Printf("[Telegram] custom command %q failed: %v", commandName(text), err)
+		}
 
 		return
 	}
@@ -156,7 +168,9 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 		return
 	}
 	if reply != "" {
-		_ = s.SendTelegramText(ctx, reply)
+		if err := s.SendTelegramText(ctx, reply); err != nil {
+			log.Printf("[Telegram] command %q failed: %v", command, err)
+		}
 	}
 }
 
@@ -205,6 +219,10 @@ func (s *Service) telegramKeyboard(page, pages int) map[string]any {
 	}
 
 	return map[string]any{"inline_keyboard": [][]map[string]string{row}}
+}
+
+func (s *Service) SendTelegramPage(ctx context.Context, text string, page, pages int) error {
+	return s.sendTelegramPage(ctx, text, pages, page)
 }
 
 func (s *Service) sendTelegramPage(ctx context.Context, text string, pages, page int) error {
@@ -286,4 +304,37 @@ func (s *Service) callTelegram(ctx context.Context, token, method string, payloa
 	}
 
 	return nil
+}
+
+func commandName(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return ""
+	}
+
+	return fields[0]
+}
+
+func (s *Service) SendTelegramButtons(ctx context.Context, text string, buttons []TelegramButton) error {
+	settings := s.GetSettings()
+	if settings.TelegramToken == "" || settings.TelegramChatID == "" {
+		return fmt.Errorf("telegram не настроен: укажите token и chat id")
+	}
+
+	rows := make([][]map[string]string, 0, len(buttons))
+	for _, button := range buttons {
+		if strings.TrimSpace(button.Text) == "" || !strings.HasPrefix(button.URL, "http") {
+			continue
+		}
+		rows = append(rows, []map[string]string{{"text": button.Text, "url": button.URL}})
+	}
+
+	payload := map[string]any{
+		"chat_id":                  settings.TelegramChatID,
+		"text":                     text,
+		"disable_web_page_preview": true,
+		"reply_markup":             map[string]any{"inline_keyboard": rows},
+	}
+
+	return s.callTelegram(ctx, settings.TelegramToken, "sendMessage", payload)
 }
