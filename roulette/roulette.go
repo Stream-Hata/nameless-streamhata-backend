@@ -93,6 +93,10 @@ type persistedState struct {
 	Eliminated []string `json:"eliminated"`
 }
 
+type Writer interface {
+	Say(text string) error
+}
+
 type Service struct {
 	mu         sync.Mutex
 	config     Config
@@ -103,6 +107,14 @@ type Service struct {
 	db         *sql.DB
 	poolCache  []catalog.Game
 	poolCached time.Time
+	writer     Writer
+}
+
+func (s *Service) SetWriter(writer Writer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.writer = writer
 }
 
 func New(db *sql.DB, games *catalog.Service) *Service {
@@ -315,6 +327,14 @@ func (s *Service) Spin(mode string) (Round, error) {
 	}
 
 	s.persistState()
+
+	writer := s.writer
+	title := selected.Title
+	if writer != nil {
+		go func() {
+			_ = writer.Say("Выпала игра: " + title)
+		}()
+	}
 
 	return round, nil
 }

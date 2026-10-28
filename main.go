@@ -220,6 +220,8 @@ func main() {
 	})
 	donations.RegisterTTSRoutes(srv, donationsService, ttsService)
 
+	rouletteService.SetWriter(chatRuntime)
+
 	commandsService := commands.New(chatRuntime, musicDB)
 	commands.RegisterRoutes(srv, commandsService)
 
@@ -1058,12 +1060,12 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 		return "алерт отправлен", nil, true
 	case "roulette.spin":
 		if a.roulette != nil {
-			if round, err := a.roulette.Spin(strings.TrimSpace(value)); err == nil && round.Game.Title != "" {
-				return "рулетка: " + round.Game.Title, nil, true
+			if _, err := a.roulette.Spin(strings.TrimSpace(value)); err != nil {
+				return "", err, true
 			}
 		}
 
-		return "рулетка запущена", nil, true
+		return "", nil, true
 	case "reward.create":
 		parts := strings.Split(value, "|")
 		if len(parts) < 3 {
