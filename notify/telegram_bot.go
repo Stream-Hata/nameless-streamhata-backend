@@ -86,6 +86,7 @@ func (s *Service) TelegramUpdates(ctx context.Context, offset int64) ([]Telegram
 
 func (s *Service) TelegramBotLoop(ctx context.Context, status func() string, music func(page int) (string, int)) {
 	s.deleteTelegramWebhook(ctx)
+	_ = s.SyncTelegramMenu(ctx)
 	var offset int64
 	for {
 		select {
@@ -139,7 +140,33 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 		}
 	}
 	if command, custom, ok := s.matchTelegramCommand(text, userName); ok {
-		if err := s.SendTelegramCommandTo(ctx, chatID, custom, command.Buttons, command.ParseMode, command.DisablePreview); err != nil {
+		if command.DeleteCommand {
+			s.deleteTelegramMessage(ctx, chatID, message.MessageID)
+		}
+
+		switch strings.ToLower(command.Action) {
+		case "delete":
+			return
+		case "music":
+			if music != nil {
+				page, pages := music(0)
+				_ = s.sendTelegramPageTo(ctx, chatID, page, pages, 0)
+			}
+
+			return
+		case "status":
+			if status != nil {
+				_ = s.SendTelegramTextTo(ctx, chatID, status())
+			}
+
+			return
+		case "ping":
+			_ = s.SendTelegramTextTo(ctx, chatID, "pong")
+
+			return
+		}
+
+		if err := s.SendTelegramCommandTo(ctx, chatID, command.ID, custom, command.Buttons, command.ParseMode, command.DisablePreview); err != nil {
 			log.Printf("[Telegram] custom command %q failed: %v", commandName(text), err)
 		}
 
@@ -195,6 +222,12 @@ func (s *Service) handleTelegramCallback(ctx context.Context, query *TelegramCal
 	}
 
 	_ = s.answerTelegramCallback(ctx, query.ID)
+
+	if strings.HasPrefix(query.Data, "cmd:") {
+		s.handleTelegramCommandCallback(ctx, chatID, query.Data)
+
+		return
+	}
 
 	if !strings.HasPrefix(query.Data, "music:") || query.Data == "music:noop" || music == nil {
 		return
@@ -334,7 +367,7 @@ func (s *Service) SendTelegramTextTo(ctx context.Context, chatID, text string) e
 	return s.sendTelegram(ctx, settings.TelegramToken, chatID, text)
 }
 
-func (s *Service) SendTelegramCommandTo(ctx context.Context, chatID, text string, buttons []TelegramButton, parseMode string, disablePreview bool) error {
+func (s *Service) SendTelegramCommandTo(ctx context.Context, chatID, commandID, text string, buttons []TelegramButton, parseMode string, disablePreview bool) error {
 	settings := s.GetSettings()
 	if settings.TelegramToken == "" || chatID == "" {
 		return fmt.Errorf("telegram не настроен: укажите token и chat id")
@@ -350,11 +383,17 @@ func (s *Service) SendTelegramCommandTo(ctx context.Context, chatID, text string
 	}
 	if len(buttons) > 0 {
 		rows := make([][]map[string]string, 0, len(buttons))
-		for _, button := range buttons {
-			if strings.TrimSpace(button.Text) == "" || !strings.HasPrefix(button.URL, "http") {
+		for index, button := range buttons {
+			if strings.TrimSpace(button.Text) == "" {
 				continue
 			}
-			rows = append(rows, []map[string]string{{"text": button.Text, "url": button.URL}})
+			item := map[string]string{"text": button.Text}
+			if strings.HasPrefix(button.URL, "http") {
+				item["url"] = button.URL
+			} else {
+				item["callback_data"] = fmt.Sprintf("cmd:%s:%d", commandID, index)
+			}
+			rows = append(rows, []map[string]string{item})
 		}
 		payload["reply_markup"] = map[string]any{"inline_keyboard": rows}
 	}
@@ -432,4 +471,64 @@ func (s *Service) TelegramChatsSeen() []TelegramChat {
 	}
 
 	return chats
+}
+
+func (s *Service) deleteTelegramMessage(ctx context.Context, chatID string, messageID int64) {
+	settings := s.GetSettings()
+	if settings.TelegramToken == "" || chatID == "" || messageID == 0 {
+		return
+	}
+
+	endpoint := fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", settings.TelegramToken)
+	payload, _ := json.Marshal(map[string]any{"chat_id": chatID, "message_id": messageID})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(payload)))
+	if err != nil {
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.http.Do(request)
+	if err != nil {
+		log.Printf("[Telegram] deleteMessage failed: %v", err)
+
+		return
+	}
+	_ = response.Body.Close()
+}
+
+func (s *Service) handleTelegramCommandCallback(ctx context.Context, chatID, data string) {
+	parts := strings.Split(data, ":")
+	if len(parts) != 3 {
+		return
+	}
+
+	var index int
+	if _, err := fmt.Sscanf(parts[2], "%d", &index); err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	var command TelegramCommand
+	found := false
+	for _, item := range s.telegramCommands {
+		if item.ID == parts[1] {
+			command = item
+			found = true
+
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if !found || index < 0 || index >= len(command.Buttons) {
+		return
+	}
+
+	button := command.Buttons[index]
+	text := strings.TrimSpace(button.CallbackResponse)
+	if text == "" {
+		text = strings.TrimSpace(command.Response)
+	}
+	if text != "" {
+		_ = s.SendTelegramTextTo(ctx, chatID, text)
+	}
 }

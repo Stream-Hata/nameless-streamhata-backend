@@ -169,6 +169,26 @@ func (s *Service) telegramChatIDs() []string {
 	return ids
 }
 
+func (s *Service) telegramAllChatIDs() []string {
+	ids := s.telegramChatIDs()
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		seen[id] = struct{}{}
+	}
+
+	s.mu.Lock()
+	for chat := range s.telegramChats {
+		id := fmt.Sprintf("%d", chat)
+		if _, ok := seen[id]; !ok {
+			ids = append(ids, id)
+			seen[id] = struct{}{}
+		}
+	}
+	s.mu.Unlock()
+
+	return ids
+}
+
 func (s *Service) isTelegramChat(chat TelegramChat) bool {
 	// Бот отвечает в любом чате, куда его добавили. Список chat ID
 	// используется только для исходящих уведомлений.
@@ -247,11 +267,23 @@ func (s *Service) SendTelegramText(ctx context.Context, text string) error {
 func (s *Service) Test(ctx context.Context) error {
 	settings := s.GetSettings()
 
-	if settings.TelegramToken == "" || settings.TelegramChatID == "" {
-		return fmt.Errorf("укажите Telegram bot token и chat id")
+	if settings.TelegramToken == "" {
+		return fmt.Errorf("укажите Telegram bot token")
 	}
 
-	return s.sendTelegram(ctx, settings.TelegramToken, settings.TelegramChatID, "JuryKit: тестовое уведомление — канал связи работает")
+	ids := s.telegramAllChatIDs()
+	if len(ids) == 0 {
+		return fmt.Errorf("укажите Telegram chat id")
+	}
+
+	var lastErr error
+	for _, chatID := range ids {
+		if err := s.sendTelegram(ctx, settings.TelegramToken, chatID, "JuryKit: тестовое уведомление — канал связи работает"); err != nil {
+			lastErr = err
+		}
+	}
+
+	return lastErr
 }
 
 // TelegramChats returns chats the bot has seen in incoming updates.

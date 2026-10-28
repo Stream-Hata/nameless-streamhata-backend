@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -13,9 +14,12 @@ import (
 // TelegramCommand — настраиваемая команда Telegram-бота.
 type TelegramCommand struct {
 	ID             string           `json:"id"`
+	Name           string           `json:"name,omitempty"`
 	Command        string           `json:"command"`
 	Aliases        []string         `json:"aliases,omitempty"`
 	Description    string           `json:"description,omitempty"`
+	Action         string           `json:"action,omitempty"`
+	DeleteCommand  bool             `json:"deleteCommand,omitempty"`
 	Response       string           `json:"response"`
 	ParseMode      string           `json:"parseMode,omitempty"`
 	DisablePreview bool             `json:"disablePreview,omitempty"`
@@ -24,8 +28,11 @@ type TelegramCommand struct {
 }
 
 type TelegramButton struct {
-	Text string `json:"text"`
-	URL  string `json:"url"`
+	Text             string `json:"text"`
+	URL              string `json:"url,omitempty"`
+	Callback         string `json:"callback,omitempty"`
+	CallbackResponse string `json:"callbackResponse,omitempty"`
+	Color            string `json:"color,omitempty"`
 }
 
 func (s *Service) loadTelegramCommands() {
@@ -35,12 +42,30 @@ func (s *Service) loadTelegramCommands() {
 
 	var raw []byte
 	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'telegram_commands'`).Scan(&raw); err != nil {
+		s.telegramCommands = defaultTelegramCommands()
+		s.persistTelegramCommands()
+
 		return
 	}
 
 	var commands []TelegramCommand
-	if json.Unmarshal(raw, &commands) == nil {
+	if json.Unmarshal(raw, &commands) == nil && len(commands) > 0 {
 		s.telegramCommands = commands
+
+		return
+	}
+
+	s.telegramCommands = defaultTelegramCommands()
+	s.persistTelegramCommands()
+}
+
+func defaultTelegramCommands() []TelegramCommand {
+	return []TelegramCommand{
+		{ID: "tg-start", Name: "Старт", Command: "/start", Response: "Привет, {user}! Я бот канала.", Enabled: true},
+		{ID: "tg-help", Name: "Помощь", Command: "/help", Response: "Команды: /status, /music, /ping", Enabled: true},
+		{ID: "tg-status", Name: "Статус", Command: "/status", Action: "status", Enabled: true},
+		{ID: "tg-music", Name: "Музыка", Command: "/music", Action: "music", Enabled: true},
+		{ID: "tg-ping", Name: "Пинг", Command: "/ping", Action: "ping", Enabled: true},
 	}
 }
 
@@ -98,6 +123,7 @@ func (s *Service) SaveTelegramCommand(command TelegramCommand) (TelegramCommand,
 		s.telegramCommands = append(s.telegramCommands, command)
 	}
 	s.persistTelegramCommands()
+	go func() { _ = s.SyncTelegramMenu(context.Background()) }()
 
 	return command, nil
 }
@@ -110,6 +136,7 @@ func (s *Service) DeleteTelegramCommand(id string) bool {
 		if s.telegramCommands[index].ID == id {
 			s.telegramCommands = append(s.telegramCommands[:index], s.telegramCommands[index+1:]...)
 			s.persistTelegramCommands()
+			go func() { _ = s.SyncTelegramMenu(context.Background()) }()
 
 			return true
 		}
@@ -211,4 +238,41 @@ func matchesTelegramCommand(command TelegramCommand, name string) bool {
 	}
 
 	return false
+}
+
+// SyncTelegramMenu обновляет меню команд в клиенте Telegram.
+func (s *Service) SyncTelegramMenu(ctx context.Context) error {
+	settings := s.GetSettings()
+	token := strings.TrimSpace(settings.TelegramToken)
+	if token == "" {
+		return fmt.Errorf("telegram token не задан")
+	}
+
+	s.mu.Lock()
+	items := append([]TelegramCommand(nil), s.telegramCommands...)
+	s.mu.Unlock()
+
+	commands := make([]map[string]string, 0, len(items))
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		name := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(item.Command)), "/")
+		if name == "" {
+			continue
+		}
+		description := strings.TrimSpace(item.Description)
+		if description == "" {
+			description = strings.TrimSpace(item.Name)
+		}
+		if description == "" {
+			description = name
+		}
+		commands = append(commands, map[string]string{
+			"command":     name,
+			"description": description,
+		})
+	}
+
+	return s.callTelegram(ctx, token, "setMyCommands", map[string]any{"commands": commands})
 }
