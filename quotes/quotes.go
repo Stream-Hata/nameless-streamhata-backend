@@ -24,6 +24,7 @@ type Quote struct {
 	Text      string    `json:"text"`
 	Author    string    `json:"author"`
 	AddedBy   string    `json:"addedBy"`
+	Votes     int       `json:"votes"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -34,6 +35,7 @@ type Service struct {
 
 	writer   chat.Writer
 	db       *sql.DB
+	voters   map[string]map[string]bool
 	randN    func(int) int
 	triggers *triggers.Service
 }
@@ -42,11 +44,13 @@ func New(writer chat.Writer, db *sql.DB) *Service {
 	service := &Service{
 		writer:   writer,
 		db:       db,
+		voters:   make(map[string]map[string]bool),
 		randN:    rand.IntN,
 		triggers: triggers.New(nil),
 	}
 
 	service.load()
+	service.loadVotes()
 
 	return service
 }
@@ -118,6 +122,41 @@ func (s *Service) Add(text, author, addedBy string) (Quote, error) {
 	return quote, nil
 }
 
+func (s *Service) Vote(id, userID string) (Quote, bool) {
+	id = strings.TrimPrefix(strings.TrimSpace(id), "#")
+	userID = strings.TrimSpace(userID)
+
+	if userID == "" {
+		return Quote{}, false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index := range s.quotes {
+		quote := &s.quotes[index]
+		if quote.ID != id && fmt.Sprintf("%d", quote.Number) != id {
+			continue
+		}
+
+		if s.voters[quote.ID] == nil {
+			s.voters[quote.ID] = make(map[string]bool)
+		}
+		if s.voters[quote.ID][userID] {
+			return *quote, false
+		}
+
+		s.voters[quote.ID][userID] = true
+		quote.Votes++
+		snapshot := *quote
+		s.persistVotes()
+
+		return snapshot, true
+	}
+
+	return Quote{}, false
+}
+
 func (s *Service) Delete(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -126,9 +165,12 @@ func (s *Service) Delete(id string) bool {
 		if quote.ID == id || fmt.Sprintf("%d", quote.Number) == id {
 			s.quotes = append(s.quotes[:index], s.quotes[index+1:]...)
 
+			delete(s.voters, quote.ID)
+
 			if s.db != nil {
 				_, _ = s.db.ExecContext(context.Background(), `DELETE FROM quote WHERE id = $1`, quote.ID)
 			}
+			s.persistVotes()
 
 			return true
 		}
@@ -174,6 +216,18 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 
 		if s.Delete(fields[1]) {
 			s.reply("Цитата удалена.")
+		}
+
+		return
+	}
+
+	// !quote vote <номер>
+	if len(fields) >= 2 && strings.EqualFold(fields[0], "vote") {
+		quote, ok := s.Vote(fields[1], message.Author.ID)
+		if !ok {
+			s.reply("Голос не учтён: цитата не найдена или ты уже голосовал.")
+		} else {
+			s.reply(fmt.Sprintf("Голос за цитату #%d учтён (голосов: %d).", quote.Number, quote.Votes))
 		}
 
 		return
@@ -282,6 +336,41 @@ func (s *Service) load() {
 	}
 }
 
+func (s *Service) loadVotes() {
+	if s.db == nil {
+		return
+	}
+
+	var raw []byte
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'quote_votes'`).Scan(&raw); err != nil {
+		return
+	}
+
+	_ = json.Unmarshal(raw, &s.voters)
+
+	s.mu.Lock()
+	for index := range s.quotes {
+		if voters := s.voters[s.quotes[index].ID]; voters != nil {
+			s.quotes[index].Votes = len(voters)
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) persistVotes() {
+	if s.db == nil {
+		return
+	}
+
+	raw, err := json.Marshal(s.voters)
+	if err != nil {
+		return
+	}
+
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('quote_votes', $1)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+}
+
 /* ── Роуты ────────────────────────────────────────────────────────── */
 
 type Deps interface {
@@ -316,6 +405,28 @@ func RegisterRoutes(srv Deps, service *Service) {
 		quote, err := service.Add(body.Text, body.Author, "panel")
 		if err != nil {
 			writeJSON(response, http.StatusBadRequest, map[string]string{"error": err.Error()})
+
+			return
+		}
+
+		writeJSON(response, http.StatusOK, quote)
+	})
+
+	srv.ServeEndpoint("/rgg-sync/quotes/{id}/vote", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		var body struct {
+			UserID string `json:"userId"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&body)
+
+		quote, ok := service.Vote(request.PathValue("id"), body.UserID)
+		if !ok {
+			writeJSON(response, http.StatusConflict, map[string]string{"error": "already voted or quote not found"})
 
 			return
 		}
