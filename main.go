@@ -308,6 +308,12 @@ func main() {
 			return time.Now().Format("02.01.2006 15:04")
 		case "timestamp":
 			return strconv.FormatInt(time.Now().Unix(), 10)
+		case "random.number":
+			minimum, maximum, ok := parseRange(value)
+			if !ok {
+				return strconv.Itoa(rand.Intn(100) + 1)
+			}
+			return strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
 		case "random":
 			if minimum, maximum, ok := parseRange(value); ok {
 				return strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
@@ -1160,12 +1166,21 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 		return a.Twitch(ctx, action, message.Author.ID), nil, true
 	case "points.balance", "points.top", "points.shop", "quotes.random":
 		return a.Twitch(ctx, action, message.Author.ID), nil, true
+	case "random.number":
+		minimum, maximum, ok := parseRange(value)
+		if !ok {
+			return "", fmt.Errorf("нужен диапазон, например 1-100"), true
+		}
+		chosen := strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
+		a.sync.PublishGame("random", value, chosen, message.Author.DisplayName)
+
+		return "@" + message.Author.Login + " выбивает случайное число: " + chosen, nil, true
 	case "random":
 		if minimum, maximum, ok := parseRange(value); ok {
 			chosen := strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
 			a.sync.PublishGame("random", value, chosen, message.Author.DisplayName)
 
-			return "@" + message.Author.Login + " случайное число: " + chosen, nil, true
+			return "@" + message.Author.Login + " выбивает случайное число: " + chosen, nil, true
 		}
 		options := strings.Split(value, "|")
 		clean := options[:0]
