@@ -385,7 +385,7 @@ func (s *Service) sendTelegram(ctx context.Context, token, chatID, text string) 
 /* ── События ──────────────────────────────────────────────────────── */
 
 // StreamEvent — события эфира.
-func (s *Service) StreamEvent(online bool, title string) {
+func (s *Service) StreamEvent(online bool, title, channelLogin string) {
 	settings := s.GetSettings()
 
 	if online && !settings.OnStreamOnline {
@@ -397,7 +397,11 @@ func (s *Service) StreamEvent(online bool, title string) {
 	}
 
 	if online {
-		s.Send(context.Background(), fmt.Sprintf("🔴 Стрим начался: %s", orDefault(title, "без названия")))
+		message := fmt.Sprintf("🔴 Стрим начался: %s", orDefault(title, "без названия"))
+		if channelLogin != "" {
+			message += fmt.Sprintf("\nhttps://twitch.tv/%s", channelLogin)
+		}
+		s.Send(context.Background(), message)
 
 		return
 	}

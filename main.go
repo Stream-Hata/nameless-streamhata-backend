@@ -435,10 +435,11 @@ func main() {
 		switch event.Type {
 		case "stream_online":
 			analyticsService.StreamOnline()
-			notifyService.StreamEvent(true, event.Message)
+			info := streamService.Refresh(ctx)
+			notifyService.StreamEvent(true, info.Title, chatRuntime.ChannelLogin())
 		case "stream_offline":
 			analyticsService.StreamOffline()
-			notifyService.StreamEvent(false, "")
+			notifyService.StreamEvent(false, "", "")
 
 			if notifyService.GetSettings().Digest {
 				go func() { _ = metricsService.SendDigestTelegram(context.Background()) }()

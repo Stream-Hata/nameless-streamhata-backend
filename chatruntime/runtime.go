@@ -472,6 +472,14 @@ func (r *Runtime) AccountCreatedAt(ctx context.Context, userID string) (string, 
 	return payload.Data[0].CreatedAt, nil
 }
 
+// ChannelLogin возвращает логин текущего канала.
+func (r *Runtime) ChannelLogin() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.broadcaster.Login
+}
+
 // GetChannelInfo возвращает title и категорию канала.
 func (r *Runtime) GetChannelInfo(ctx context.Context) (string, string, string, error) {
 	token, broadcasterID, err := r.credentials()
