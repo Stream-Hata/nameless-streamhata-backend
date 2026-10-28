@@ -1468,6 +1468,114 @@ func (r *Runtime) UnbanUser(ctx context.Context, userID string) error {
 	return nil
 }
 
+// AddModerator adds a moderator.
+func (r *Runtime) AddModerator(ctx context.Context, userID string) error {
+	return r.moderator(ctx, http.MethodPost, userID)
+}
+
+// RemoveModerator removes a moderator.
+func (r *Runtime) RemoveModerator(ctx context.Context, userID string) error {
+	return r.moderator(ctx, http.MethodDelete, userID)
+}
+
+func (r *Runtime) moderator(ctx context.Context, method, userID string) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/moderation/moderators?broadcaster_id=%s&user_id=%s", broadcasterID, urlQueryEscape(userID))
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("moderators returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
+// AddVIP adds a VIP.
+func (r *Runtime) AddVIP(ctx context.Context, userID string) error {
+	return r.vip(ctx, http.MethodPost, userID)
+}
+
+// RemoveVIP removes a VIP.
+func (r *Runtime) RemoveVIP(ctx context.Context, userID string) error {
+	return r.vip(ctx, http.MethodDelete, userID)
+}
+
+func (r *Runtime) vip(ctx context.Context, method, userID string) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/channels/vips?broadcaster_id=%s&user_id=%s", broadcasterID, urlQueryEscape(userID))
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("vips returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
+// UpdateChatSettings updates chat settings.
+func (r *Runtime) UpdateChatSettings(ctx context.Context, settings map[string]any) error {
+	token, broadcasterID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+
+	endpoint := fmt.Sprintf("https://api.twitch.tv/helix/chat/settings?broadcaster_id=%s&moderator_id=%s", broadcasterID, broadcasterID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPatch, endpoint, strings.NewReader(string(raw)))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Client-Id", r.clientID)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := r.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("chat settings returned %d", response.StatusCode)
+	}
+
+	return nil
+}
+
 /* ── Контракт integrations.Component ──────────────────────────────── */
 
 func (r *Runtime) ID() string {

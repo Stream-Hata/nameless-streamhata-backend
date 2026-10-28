@@ -245,7 +245,7 @@ func main() {
 	quotesService.SetTriggers(triggersService)
 	quotes.RegisterRoutes(srv, quotesService)
 
-	actioner := commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService, quotes: quotesService, sync: syncService, commands: commandsService}
+	actioner := commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService, quotes: quotesService, sync: syncService, commands: commandsService, widgets: widgetsService, alerts: alertsService, roulette: rouletteService}
 	commandsService.SetActioner(actioner)
 	diceFormula := func(value string, message twitch.TwitchChatMessage) string {
 		raw := strings.ToLower(strings.TrimSpace(value))
@@ -342,6 +342,11 @@ func main() {
 			return pointsService.TopText()
 		case "points.shop":
 			return pointsService.ShopText()
+		case "widget.enabled":
+			if widgetsService.Get()[strings.TrimSpace(value)] {
+				return "включён"
+			}
+			return "выключен"
 		case "twitch.followage", "twitch.accountage", "twitch.uptime", "twitch.viewers", "twitch.title", "twitch.game", "twitch.followers", "twitch.subscribers", "twitch.chatters":
 			value := actioner.Twitch(context.Background(), name, message.Author.ID)
 			value = strings.TrimPrefix(value, "Фолловер с ")
@@ -696,6 +701,9 @@ type commandActioner struct {
 	quotes   *quotes.Service
 	sync     *syncstate.Service
 	commands *commands.Service
+	widgets  *widgets.Service
+	alerts   *alerts.Service
+	roulette *roulette.Service
 }
 
 func (a commandActioner) AwardPoints(userID, login, displayName string, amount int, reason string) error {
@@ -976,6 +984,113 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 			return "сейчас ничего не играет", nil, true
 		}
 		return "сейчас играет: " + track.URL, nil, true
+	case "widget.enable", "widget.disable", "widget.toggle":
+		kind := strings.TrimSpace(value)
+		if a.widgets != nil && kind != "" {
+			enabled := action == "widget.enable"
+			if action == "widget.toggle" {
+				enabled = !a.widgets.Get()[kind]
+			}
+			a.widgets.Set(kind, enabled)
+		}
+
+		return "виджет обновлён", nil, true
+	case "widget.config":
+		parts := strings.SplitN(value, "|", 2)
+		if a.widgets != nil && len(parts) == 2 {
+			var config map[string]any
+			if err := json.Unmarshal([]byte(parts[1]), &config); err == nil {
+				a.widgets.SetConfig(strings.TrimSpace(parts[0]), config)
+			}
+		}
+
+		return "конфиг виджета обновлён", nil, true
+	case "alert.test":
+		if a.alerts != nil {
+			a.alerts.Test(strings.TrimSpace(value))
+		}
+
+		return "алерт отправлен", nil, true
+	case "roulette.spin":
+		if a.roulette != nil {
+			if round, err := a.roulette.Spin(strings.TrimSpace(value)); err == nil && round.Game.Title != "" {
+				return "рулетка: " + round.Game.Title, nil, true
+			}
+		}
+
+		return "рулетка запущена", nil, true
+	case "reward.create":
+		parts := strings.Split(value, "|")
+		if len(parts) < 3 {
+			return "", fmt.Errorf("формат: title|prompt|cost|enabled"), true
+		}
+		cost, _ := strconv.Atoi(strings.TrimSpace(parts[2]))
+		enabled := true
+		if len(parts) > 3 {
+			enabled = strings.EqualFold(strings.TrimSpace(parts[3]), "true") || strings.TrimSpace(parts[3]) == "1"
+		}
+		_, err := a.chat.CreateChannelReward(ctx, strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), cost, enabled)
+
+		return "награда создана", err, true
+	case "reward.update":
+		parts := strings.Split(value, "|")
+		if len(parts) < 4 {
+			return "", fmt.Errorf("формат: id|title|prompt|cost|enabled"), true
+		}
+		cost, _ := strconv.Atoi(strings.TrimSpace(parts[3]))
+		enabled := true
+		if len(parts) > 4 {
+			enabled = strings.EqualFold(strings.TrimSpace(parts[4]), "true") || strings.TrimSpace(parts[4]) == "1"
+		}
+		_, err := a.chat.UpdateChannelReward(ctx, strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2]), cost, enabled)
+
+		return "награда обновлена", err, true
+	case "reward.delete":
+		return "награда удалена", a.chat.DeleteChannelReward(ctx, strings.TrimSpace(value)), true
+	case "reward.fulfill":
+		parts := strings.Split(value, "|")
+		if len(parts) < 2 {
+			return "", fmt.Errorf("формат: reward_id|redemption_id"), true
+		}
+		return "награда выполнена", a.chat.FulfillRedemption(ctx, strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])), true
+	case "mod.add", "mod.remove", "vip.add", "vip.remove":
+		targetID, _, err := a.resolveTarget(ctx, message, value)
+		if err != nil {
+			return "", err, true
+		}
+		switch action {
+		case "mod.add":
+			err = a.chat.AddModerator(ctx, targetID)
+		case "mod.remove":
+			err = a.chat.RemoveModerator(ctx, targetID)
+		case "vip.add":
+			err = a.chat.AddVIP(ctx, targetID)
+		case "vip.remove":
+			err = a.chat.RemoveVIP(ctx, targetID)
+		}
+
+		return "роль обновлена", err, true
+	case "chat.settings":
+		settings := map[string]any{}
+		for _, item := range strings.Split(value, ",") {
+			key, val, ok := strings.Cut(item, "=")
+			if !ok {
+				continue
+			}
+			switch strings.TrimSpace(val) {
+			case "true", "1":
+				settings[strings.TrimSpace(key)] = true
+			case "false", "0":
+				settings[strings.TrimSpace(key)] = false
+			default:
+				if number, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
+					settings[strings.TrimSpace(key)] = number
+				} else {
+					settings[strings.TrimSpace(key)] = strings.TrimSpace(val)
+				}
+			}
+		}
+		return "настройки чата обновлены", a.chat.UpdateChatSettings(ctx, settings), true
 	case "timer.start":
 		seconds, _ := strconv.Atoi(strings.TrimSpace(value))
 		if seconds > 0 {

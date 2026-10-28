@@ -93,6 +93,9 @@ func (s *Service) Update(list []Trigger) ([]Trigger, error) {
 		"random", "variable.set", "variable.inc", "variable.dec", "command.run", "timer.start",
 		"timer.pause", "timer.reset", "timer.add", "twitch.followage", "twitch.accountage", "twitch.uptime",
 		"twitch.viewers", "twitch.title", "twitch.game", "twitch.followers", "twitch.subscribers", "twitch.chatters",
+		"widget.enable", "widget.disable", "widget.toggle", "widget.config", "alert.test", "roulette.spin",
+		"reward.create", "reward.update", "reward.delete", "reward.fulfill", "mod.add", "mod.remove",
+		"vip.add", "vip.remove", "chat.settings", "widget.enabled",
 	} {
 		known[action] = true
 	}

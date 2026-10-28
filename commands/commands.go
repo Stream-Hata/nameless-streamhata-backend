@@ -165,7 +165,9 @@ func isAdvancedAction(action string) bool {
 		"raid", "raid.cancel", "marker", "shield.on", "shield.off", "title.set", "game.set", "commercial",
 		"poll", "poll.end", "dice", "coinflip", "random", "quote.add", "points.redeem", "games.slots",
 		"games.wheel", "games.trivia", "games.duel", "games.accept", "music.current", "timer.start",
-		"timer.pause", "timer.reset", "timer.add":
+		"timer.pause", "timer.reset", "timer.add", "widget.enable", "widget.disable", "widget.toggle",
+		"widget.config", "alert.test", "roulette.spin", "reward.create", "reward.update", "reward.delete",
+		"reward.fulfill", "mod.add", "mod.remove", "vip.add", "vip.remove", "chat.settings":
 		return true
 	}
 
