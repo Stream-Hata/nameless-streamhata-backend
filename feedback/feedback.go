@@ -37,21 +37,22 @@ type Config struct {
 }
 
 type Report struct {
-	Area        string `json:"area"`
-	Kind        string `json:"kind"`
-	Reason      string `json:"reason"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Steps       string `json:"steps"`
-	Expected    string `json:"expected"`
-	Actual      string `json:"actual"`
-	Version     string `json:"version"`
-	Severity    string `json:"severity"`
-	PageURL     string `json:"pageUrl"`
-	Environment string `json:"environment"`
-	Contact     string `json:"contact"`
-	Author      string `json:"author"`
-	Website     string `json:"website"`
+	Area        string   `json:"area"`
+	Kind        string   `json:"kind"`
+	Reason      string   `json:"reason"`
+	Reasons     []string `json:"reasons"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Steps       string   `json:"steps"`
+	Expected    string   `json:"expected"`
+	Actual      string   `json:"actual"`
+	Version     string   `json:"version"`
+	Severity    string   `json:"severity"`
+	PageURL     string   `json:"pageUrl"`
+	Environment string   `json:"environment"`
+	Contact     string   `json:"contact"`
+	Author      string   `json:"author"`
+	Website     string   `json:"website"`
 }
 
 type Result struct {
@@ -449,8 +450,15 @@ func formatBody(report Report) string {
 	if report.Actual != "" {
 		body.WriteString("\n### Фактическое поведение\n\n" + report.Actual + "\n")
 	}
-	if report.Reason != "" {
-		body.WriteString("\n### Причина\n\n" + report.Reason + "\n")
+	reasons := report.Reasons
+	if len(reasons) == 0 && report.Reason != "" {
+		reasons = []string{report.Reason}
+	}
+	if len(reasons) > 0 {
+		body.WriteString("\n### Причины\n\n")
+		for _, reason := range reasons {
+			body.WriteString("- " + reason + "\n")
+		}
 	}
 	body.WriteString("\n### Окружение\n\n")
 	body.WriteString("- Область: " + report.Area + "\n")
