@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/p7x-dev/nameless-streamhata-backend/vaultsecrets"
 )
 
 type Deps interface {
@@ -36,6 +38,7 @@ type Config struct {
 type Report struct {
 	Area        string `json:"area"`
 	Kind        string `json:"kind"`
+	Reason      string `json:"reason"`
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Steps       string `json:"steps"`
@@ -90,6 +93,20 @@ func defaultConfig() Config {
 }
 
 func (s *Service) load() {
+	if data, err := vaultsecrets.GetSecret("streamhata-feedback"); err == nil {
+		if raw := data["config"]; raw != "" {
+			var config Config
+			if json.Unmarshal([]byte(raw), &config) == nil {
+				if config.Repos == nil {
+					config.Repos = defaultConfig().Repos
+				}
+				s.config = config
+
+				return
+			}
+		}
+	}
+
 	if s.db == nil {
 		return
 	}
@@ -108,12 +125,15 @@ func (s *Service) load() {
 }
 
 func (s *Service) save() error {
-	if s.db == nil {
-		return fmt.Errorf("database unavailable")
-	}
 	raw, err := json.Marshal(s.config)
 	if err != nil {
 		return err
+	}
+	if err := vaultsecrets.PutSecret("streamhata-feedback", map[string]string{"config": string(raw)}); err == nil {
+		return nil
+	}
+	if s.db == nil {
+		return fmt.Errorf("OpenBao и база недоступны")
 	}
 	_, err = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('feedback_config', $1)
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
@@ -414,6 +434,9 @@ func formatBody(report Report) string {
 	}
 	if report.Actual != "" {
 		body.WriteString("\n### Фактическое поведение\n\n" + report.Actual + "\n")
+	}
+	if report.Reason != "" {
+		body.WriteString("\n### Причина\n\n" + report.Reason + "\n")
 	}
 	body.WriteString("\n### Окружение\n\n")
 	body.WriteString("- Область: " + report.Area + "\n")
