@@ -163,7 +163,6 @@ func main() {
 
 	feedbackService := feedback.New(musicDB)
 	feedbackService.RegisterRoutes(srv)
-	go feedbackService.BotLoop(ctx)
 
 	eventsService := events.New(musicDB)
 	lots.RegisterRoutes(srv)
@@ -229,6 +228,11 @@ func main() {
 	go sevenTVService.Run(ctx)
 
 	notifyService := notify.New(musicDB)
+	if token := feedbackService.TelegramToken(); token != "" && token != notifyService.GetSettings().TelegramToken {
+		go feedbackService.BotLoop(ctx)
+	} else if token != "" {
+		log.Printf("[Feedback] bot token совпадает с основным Telegram-ботом; отдельный loop не запущен")
+	}
 	notify.RegisterRoutes(srv, notifyService)
 	musicService.SetTelegramSender(notifyService.SendTelegramText)
 	musicService.SetTelegramPageSender(notifyService.SendTelegramPage)

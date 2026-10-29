@@ -33,6 +33,7 @@ type Config struct {
 	GitHubPrivateKey     string            `json:"githubPrivateKey"`
 	TelegramToken        string            `json:"telegramToken"`
 	TelegramChat         string            `json:"telegramChat"`
+	TelegramOwner        string            `json:"telegramOwner"`
 	Repos                map[string]string `json:"repos"`
 }
 
@@ -88,12 +89,20 @@ func New(db *sql.DB) *Service {
 
 func defaultConfig() Config {
 	return Config{
+		TelegramOwner: "p7x_dev",
 		Repos: map[string]string{
 			"backend":  "Stream-Hata/nameless-streamhata-backend",
 			"frontend": "Stream-Hata/stream-hata-frontend",
 			"desktop":  "Stream-Hata/streamhata-desktop",
 		},
 	}
+}
+
+func (s *Service) TelegramToken() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return strings.TrimSpace(s.config.TelegramToken)
 }
 
 func (s *Service) load() {

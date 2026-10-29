@@ -21,12 +21,18 @@ type botMessage struct {
 	Chat      struct {
 		ID int64 `json:"id"`
 	} `json:"chat"`
+	From struct {
+		Username string `json:"username"`
+	} `json:"from"`
 	Text string `json:"text"`
 }
 
 type botCallback struct {
-	ID      string      `json:"id"`
-	Data    string      `json:"data"`
+	ID   string `json:"id"`
+	Data string `json:"data"`
+	From struct {
+		Username string `json:"username"`
+	} `json:"from"`
 	Message *botMessage `json:"message"`
 }
 
@@ -85,17 +91,53 @@ func (s *Service) botUpdates(ctx context.Context, offset int64) ([]botUpdate, in
 
 func (s *Service) botHandle(ctx context.Context, update botUpdate) {
 	s.mu.Lock()
-	token := s.config.TelegramToken
-	chat := s.config.TelegramChat
+	token := strings.TrimSpace(s.config.TelegramToken)
+	configured := strings.TrimSpace(s.config.TelegramChat)
+	owner := strings.TrimSpace(s.config.TelegramOwner)
 	s.mu.Unlock()
-	if token == "" || chat == "" {
+	if token == "" {
 		return
 	}
+	if owner == "" {
+		owner = "p7x_dev"
+	}
+
+	var username string
 	if update.CallbackQuery != nil {
-		s.botCallback(ctx, update.CallbackQuery, token, chat)
+		username = update.CallbackQuery.From.Username
+	} else if update.Message != nil {
+		username = update.Message.From.Username
+	}
+	if !strings.EqualFold(username, owner) {
 		return
 	}
-	if update.Message == nil || strconv.FormatInt(update.Message.Chat.ID, 10) != chat {
+
+	var chatID string
+	if update.CallbackQuery != nil && update.CallbackQuery.Message != nil {
+		chatID = strconv.FormatInt(update.CallbackQuery.Message.Chat.ID, 10)
+	} else if update.Message != nil {
+		chatID = strconv.FormatInt(update.Message.Chat.ID, 10)
+	}
+	if chatID == "" {
+		return
+	}
+
+	if configured == "" || strings.Contains(configured, "X") {
+		s.mu.Lock()
+		s.config.TelegramChat = chatID
+		s.mu.Unlock()
+		_ = s.save()
+		configured = chatID
+	}
+	if chatID != configured {
+		return
+	}
+
+	if update.CallbackQuery != nil {
+		s.botCallback(ctx, update.CallbackQuery, token, configured)
+		return
+	}
+	if update.Message == nil {
 		return
 	}
 	fields := strings.Fields(strings.TrimSpace(update.Message.Text))
@@ -105,12 +147,12 @@ func (s *Service) botHandle(ctx context.Context, update botUpdate) {
 	switch strings.ToLower(fields[0]) {
 	case "/issues", "/issue":
 		if len(fields) > 1 {
-			s.botIssue(ctx, token, chat, strings.ToUpper(fields[1]))
+			s.botIssue(ctx, token, configured, strings.ToUpper(fields[1]))
 			return
 		}
-		s.botIssues(ctx, token, chat)
+		s.botIssues(ctx, token, configured)
 	case "/help", "/start":
-		s.botSend(ctx, token, chat, "Feedback bot\n/issues — открытые issue\n/issue BE-001 — детали")
+		s.botSend(ctx, token, configured, "Feedback bot\n/issues — открытые issue\n/issue BE-001 — детали")
 	}
 }
 
@@ -128,8 +170,9 @@ func (s *Service) botIssues(ctx context.Context, token, chat string) {
 		if err != nil {
 			continue
 		}
+		prefix := map[string]string{"backend": "BE", "frontend": "FE", "desktop": "DT"}[area]
 		for _, issue := range issues {
-			fmt.Fprintf(&text, "• %s #%d %s\n", strings.ToUpper(area[:2]), issue.Number, issue.Title)
+			fmt.Fprintf(&text, "• %s #%d %s\n", prefix, issue.Number, issue.Title)
 		}
 	}
 	s.botSend(ctx, token, chat, text.String())
@@ -168,7 +211,7 @@ func (s *Service) botCallback(ctx context.Context, query *botCallback, token, ch
 		return
 	}
 	number, _ := strconv.Atoi(fields[1])
-	area := map[string]string{"BE": "backend", "FE": "frontend", "DE": "desktop"}[strings.ToUpper(fields[0])]
+	area := map[string]string{"BE": "backend", "FE": "frontend", "DT": "desktop"}[strings.ToUpper(fields[0])]
 	state := "closed"
 	if parts[1] == "open" {
 		state = "open"
