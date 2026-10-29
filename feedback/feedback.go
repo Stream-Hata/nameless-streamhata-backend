@@ -133,16 +133,7 @@ func (s *Service) save() error {
 	if err != nil {
 		return err
 	}
-	if err := vaultsecrets.PutSecret("streamhata-feedback", map[string]string{"config": string(raw)}); err == nil {
-		return nil
-	}
-	if s.db == nil {
-		return fmt.Errorf("OpenBao и база недоступны")
-	}
-	_, err = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('feedback_config', $1)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
-
-	return err
+	return vaultsecrets.PutSecret("streamhata-feedback", map[string]string{"config": string(raw)})
 }
 
 func (s *Service) RegisterRoutes(srv Deps) {
@@ -229,7 +220,10 @@ func (s *Service) allow(remote string) bool {
 }
 
 func (s *Service) create(ctx context.Context, report Report) (Result, error) {
-	prefix := map[string]string{"backend": "BE", "frontend": "FE", "desktop": "DE"}[report.Area]
+	prefix := map[string]string{"backend": "BE", "frontend": "FE", "desktop": "DT"}[report.Area]
+	if report.Kind == "feedback" {
+		prefix = "FB"
+	}
 	number, err := s.nextNumber(ctx, prefix)
 	if err != nil {
 		return Result{}, err
