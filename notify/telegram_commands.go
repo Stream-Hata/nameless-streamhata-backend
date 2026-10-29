@@ -13,18 +13,22 @@ import (
 
 // TelegramCommand — настраиваемая команда Telegram-бота.
 type TelegramCommand struct {
-	ID             string           `json:"id"`
-	Name           string           `json:"name,omitempty"`
-	Command        string           `json:"command"`
-	Aliases        []string         `json:"aliases,omitempty"`
-	Description    string           `json:"description,omitempty"`
-	Action         string           `json:"action,omitempty"`
-	DeleteCommand  bool             `json:"deleteCommand,omitempty"`
-	Response       string           `json:"response"`
-	ParseMode      string           `json:"parseMode,omitempty"`
-	DisablePreview bool             `json:"disablePreview,omitempty"`
-	Enabled        bool             `json:"enabled"`
-	Buttons        []TelegramButton `json:"buttons,omitempty"`
+	ID              string           `json:"id"`
+	Name            string           `json:"name,omitempty"`
+	Command         string           `json:"command"`
+	Aliases         []string         `json:"aliases,omitempty"`
+	Description     string           `json:"description,omitempty"`
+	Action          string           `json:"action,omitempty"`
+	DeleteCommand   bool             `json:"deleteCommand,omitempty"`
+	Response        string           `json:"response"`
+	ResponsePrivate string           `json:"responsePrivate,omitempty"`
+	ResponseChannel string           `json:"responseChannel,omitempty"`
+	ResponseGroup   string           `json:"responseGroup,omitempty"`
+	ParseMode       string           `json:"parseMode,omitempty"`
+	DisablePreview  bool             `json:"disablePreview,omitempty"`
+	Enabled         bool             `json:"enabled"`
+	Buttons         []TelegramButton `json:"buttons,omitempty"`
+	Chain           []string         `json:"chain,omitempty"`
 }
 
 type TelegramButton struct {
@@ -146,7 +150,7 @@ func (s *Service) DeleteTelegramCommand(id string) bool {
 	return false
 }
 
-func (s *Service) matchTelegramCommand(text, userName string) (TelegramCommand, string, bool) {
+func (s *Service) matchTelegramCommand(text, userName, chatType string) (TelegramCommand, string, bool) {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
 		return TelegramCommand{}, "", false
@@ -163,13 +167,29 @@ func (s *Service) matchTelegramCommand(text, userName string) (TelegramCommand, 
 			continue
 		}
 
+		responseTemplate := command.Response
+		switch chatType {
+		case "private":
+			if strings.TrimSpace(command.ResponsePrivate) != "" {
+				responseTemplate = command.ResponsePrivate
+			}
+		case "channel":
+			if strings.TrimSpace(command.ResponseChannel) != "" {
+				responseTemplate = command.ResponseChannel
+			}
+		case "group", "supergroup":
+			if strings.TrimSpace(command.ResponseGroup) != "" {
+				responseTemplate = command.ResponseGroup
+			}
+		}
+
 		response := strings.NewReplacer(
 			"{user}", userName,
 			"{name}", userName,
 			"{args}", args,
 			"{date}", time.Now().Format("02.01.2006"),
 			"{time}", time.Now().Format("15:04"),
-		).Replace(command.Response)
+		).Replace(responseTemplate)
 
 		return command, response, true
 	}

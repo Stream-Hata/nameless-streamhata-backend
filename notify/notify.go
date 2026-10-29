@@ -16,16 +16,17 @@ import (
 
 // Settings — куда и о чём слать уведомления.
 type Settings struct {
-	Enabled         bool     `json:"enabled"`
-	DiscordWebhook  string   `json:"discordWebhook"`
-	TelegramToken   string   `json:"telegramToken"`
-	TelegramChatID  string   `json:"telegramChatId"`
-	TelegramChatIDs []string `json:"telegramChatIds"`
-	OnStreamOnline  bool     `json:"onStreamOnline"`
-	OnStreamOffline bool     `json:"onStreamOffline"`
-	OnAlerts        bool     `json:"onAlerts"`
-	OnDonations     bool     `json:"onDonations"`
-	Digest          bool     `json:"digest"`
+	Enabled            bool     `json:"enabled"`
+	DiscordWebhook     string   `json:"discordWebhook"`
+	TelegramToken      string   `json:"telegramToken"`
+	TelegramChatID     string   `json:"telegramChatId"`
+	TelegramChatIDs    []string `json:"telegramChatIds"`
+	TelegramOwnerLogin string   `json:"telegramOwnerLogin"`
+	OnStreamOnline     bool     `json:"onStreamOnline"`
+	OnStreamOffline    bool     `json:"onStreamOffline"`
+	OnAlerts           bool     `json:"onAlerts"`
+	OnDonations        bool     `json:"onDonations"`
+	Digest             bool     `json:"digest"`
 }
 
 func defaultSettings() Settings {

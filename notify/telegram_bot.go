@@ -84,7 +84,7 @@ func (s *Service) TelegramUpdates(ctx context.Context, offset int64) ([]Telegram
 	return payload.Result, offset, nil
 }
 
-func (s *Service) TelegramBotLoop(ctx context.Context, status func() string, music func(page int) (string, int)) {
+func (s *Service) TelegramBotLoop(ctx context.Context, status func() string, music func(page int) (string, int), ownerLogin func() string) {
 	s.deleteTelegramWebhook(ctx)
 	_ = s.SyncTelegramMenu(ctx)
 	var offset int64
@@ -102,14 +102,14 @@ func (s *Service) TelegramBotLoop(ctx context.Context, status func() string, mus
 		if err == nil {
 			offset = next
 			for _, update := range updates {
-				s.handleTelegramUpdate(ctx, update, status, music)
+				s.handleTelegramUpdate(ctx, update, status, music, ownerLogin)
 			}
 		}
 		time.Sleep(2 * time.Second)
 	}
 }
 
-func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdate, status func() string, music func(page int) (string, int)) {
+func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdate, status func() string, music func(page int) (string, int), ownerLogin func() string) {
 	if update.CallbackQuery != nil {
 		if update.CallbackQuery.Message != nil {
 			s.recordTelegramChat(update.CallbackQuery.Message.Chat)
@@ -129,6 +129,13 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 	if !s.isTelegramChat(message.Chat) {
 		return
 	}
+	settings := s.GetSettings()
+	if settings.TelegramOwnerLogin != "" && ownerLogin != nil {
+		owner := strings.TrimSpace(ownerLogin())
+		if owner != "" && !strings.EqualFold(owner, settings.TelegramOwnerLogin) {
+			return
+		}
+	}
 
 	text := strings.TrimSpace(message.Text)
 	userName := "канал"
@@ -139,7 +146,7 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 			userName = message.From.FirstName
 		}
 	}
-	if command, custom, ok := s.matchTelegramCommand(text, userName); ok {
+	if command, custom, ok := s.matchTelegramCommand(text, userName, message.Chat.Type); ok {
 		if command.DeleteCommand {
 			s.deleteTelegramMessage(ctx, chatID, message.MessageID)
 		}
@@ -169,6 +176,8 @@ func (s *Service) handleTelegramUpdate(ctx context.Context, update TelegramUpdat
 		if err := s.SendTelegramCommandTo(ctx, chatID, command.ID, custom, command.Buttons, command.ParseMode, command.DisablePreview); err != nil {
 			log.Printf("[Telegram] custom command %q failed: %v", commandName(text), err)
 		}
+
+		s.runTelegramChain(ctx, chatID, message.Chat.Type, command.Chain, userName, status, music, 0)
 
 		return
 	}
@@ -530,5 +539,47 @@ func (s *Service) handleTelegramCommandCallback(ctx context.Context, chatID, dat
 	}
 	if text != "" {
 		_ = s.SendTelegramTextTo(ctx, chatID, text)
+	}
+}
+
+func (s *Service) runTelegramChain(ctx context.Context, chatID, chatType string, chain []string, userName string, status func() string, music func(page int) (string, int), depth int) {
+	if depth >= 5 {
+		return
+	}
+
+	for _, name := range chain {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !strings.HasPrefix(name, "/") {
+			name = "/" + name
+		}
+
+		command, response, ok := s.matchTelegramCommand(name, userName, chatType)
+		if !ok {
+			continue
+		}
+
+		switch strings.ToLower(command.Action) {
+		case "music":
+			if music != nil {
+				page, pages := music(0)
+				_ = s.sendTelegramPageTo(ctx, chatID, page, pages, 0)
+			}
+		case "status":
+			if status != nil {
+				_ = s.SendTelegramTextTo(ctx, chatID, status())
+			}
+		case "ping":
+			_ = s.SendTelegramTextTo(ctx, chatID, "pong")
+		case "delete":
+		default:
+			if err := s.SendTelegramCommandTo(ctx, chatID, command.ID, response, command.Buttons, command.ParseMode, command.DisablePreview); err != nil {
+				log.Printf("[Telegram] chain command %q failed: %v", name, err)
+			}
+		}
+
+		s.runTelegramChain(ctx, chatID, chatType, command.Chain, userName, status, music, depth+1)
 	}
 }

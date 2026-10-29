@@ -559,6 +559,8 @@ func main() {
 		return fmt.Sprintf("В эфире, зрителей: %d, с %s", viewers, started)
 	}, func(page int) (string, int) {
 		return musicService.TelegramPage(page, 10)
+	}, func() string {
+		return chatRuntime.ChannelLogin()
 	})
 
 	// Конвейер чата: активность таймеров, команды, модерация, баллы, игры.
