@@ -175,8 +175,17 @@ func (s *Service) botHandle(ctx context.Context, update botUpdate) {
 		s.botIssues(ctx, token, configured, page)
 	case "/issue":
 		if len(fields) > 1 {
-			s.botIssue(ctx, token, configured, strings.ToUpper(fields[1]))
-			return
+			key := strings.ToUpper(fields[1])
+			if strings.HasPrefix(key, "FB-") {
+				s.botIssue(ctx, token, configured, key)
+				return
+			}
+			parts := strings.Split(key, "-")
+			if len(parts) == 2 {
+				number, _ := strconv.Atoi(parts[1])
+				s.botIssueDetail(ctx, token, configured, parts[0], number)
+				return
+			}
 		}
 		s.botIssues(ctx, token, configured, 0)
 	case "/feedbacks":
@@ -375,11 +384,16 @@ func (s *Service) botIssueDetail(ctx context.Context, token, chat, prefix string
 		assignees = append(assignees, assignee.Login)
 	}
 	body := issue.Body
-	if len([]rune(body)) > 1800 {
-		body = string([]rune(body)[:1800]) + "…"
+	if len([]rune(body)) > 3000 {
+		body = string([]rune(body)[:3000]) + "…"
 	}
-	text := fmt.Sprintf("%s #%d\n%s\n\nСостояние: %s\nМетки: %s\nИсполнители: %s\n\n%s\n\n%s",
-		prefix, issue.Number, issue.Title, issue.State, strings.Join(labels, ", "), strings.Join(assignees, ", "), body, issue.HTMLURL)
+	milestone := "—"
+	if issue.Milestone != nil {
+		milestone = issue.Milestone.Title
+	}
+	text := fmt.Sprintf("%s #%d\n%s\n\nАвтор: @%s\nСостояние: %s\nСоздано: %s\nОбновлено: %s\nКомментариев: %d\nМетки: %s\nИсполнители: %s\nMilestone: %s\n\n%s\n\n%s",
+		prefix, issue.Number, issue.Title, issue.User.Login, issue.State, issue.CreatedAt, issue.UpdatedAt,
+		issue.Comments, strings.Join(labels, ", "), strings.Join(assignees, ", "), milestone, body, issue.HTMLURL)
 	key := fmt.Sprintf("%s-%d", strings.ToUpper(prefix), number)
 	keyboard := map[string]any{"inline_keyboard": [][]map[string]string{
 		{

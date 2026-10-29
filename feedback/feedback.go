@@ -585,12 +585,22 @@ func hash(value string) string {
 }
 
 type githubIssue struct {
-	Number  int    `json:"number"`
-	Title   string `json:"title"`
-	Body    string `json:"body"`
-	HTMLURL string `json:"html_url"`
-	State   string `json:"state"`
-	Labels  []struct {
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	Body        string `json:"body"`
+	HTMLURL     string `json:"html_url"`
+	State       string `json:"state"`
+	StateReason string `json:"state_reason"`
+	Comments    int    `json:"comments"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+	User        struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Milestone *struct {
+		Title string `json:"title"`
+	} `json:"milestone"`
+	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
 	Assignees []struct {
