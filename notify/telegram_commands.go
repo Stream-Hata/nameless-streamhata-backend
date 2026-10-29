@@ -50,7 +50,8 @@ func (s *Service) loadTelegramCommands() {
 
 	var commands []TelegramCommand
 	if json.Unmarshal(raw, &commands) == nil && len(commands) > 0 {
-		s.telegramCommands = commands
+		s.telegramCommands = mergeDefaultTelegramCommands(commands)
+		s.persistTelegramCommands()
 
 		return
 	}
@@ -275,4 +276,19 @@ func (s *Service) SyncTelegramMenu(ctx context.Context) error {
 	}
 
 	return s.callTelegram(ctx, token, "setMyCommands", map[string]any{"commands": commands})
+}
+
+func mergeDefaultTelegramCommands(existing []TelegramCommand) []TelegramCommand {
+	seen := make(map[string]bool, len(existing))
+	for _, command := range existing {
+		seen[strings.ToLower(command.Command)] = true
+	}
+
+	for _, command := range defaultTelegramCommands() {
+		if !seen[strings.ToLower(command.Command)] {
+			existing = append(existing, command)
+		}
+	}
+
+	return existing
 }
