@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -123,6 +124,22 @@ func main() {
 		log.Printf("[Music] running without persistence: %v", err)
 		musicDB = nil
 	}
+
+	startedAt := time.Now()
+	srv.ServeEndpoint("/rgg-sync/prometheus", func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		dbUp := 1
+		if musicDB == nil || musicDB.PingContext(request.Context()) != nil {
+			dbUp = 0
+		}
+		fmt.Fprintf(response, "# HELP nsh_up Backend process is running.\n# TYPE nsh_up gauge\nnsh_up 1\n")
+		fmt.Fprintf(response, "# HELP nsh_uptime_seconds Backend uptime.\n# TYPE nsh_uptime_seconds gauge\nnsh_uptime_seconds %.0f\n", time.Since(startedAt).Seconds())
+		fmt.Fprintf(response, "# HELP nsh_goroutines Current goroutines.\n# TYPE nsh_goroutines gauge\nnsh_goroutines %d\n", runtime.NumGoroutine())
+		fmt.Fprintf(response, "# HELP nsh_memory_alloc_bytes Allocated memory.\n# TYPE nsh_memory_alloc_bytes gauge\nnsh_memory_alloc_bytes %d\n", mem.Alloc)
+		fmt.Fprintf(response, "# HELP nsh_db_up Database reachable.\n# TYPE nsh_db_up gauge\nnsh_db_up %d\n", dbUp)
+	})
 
 	srv.ServeEndpoint("/health", func(response http.ResponseWriter, request *http.Request) {
 		if musicDB == nil {
