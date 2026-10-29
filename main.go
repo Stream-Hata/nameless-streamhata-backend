@@ -32,6 +32,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/desktopauth"
 	"github.com/p7x-dev/nameless-streamhata-backend/donations"
 	"github.com/p7x-dev/nameless-streamhata-backend/events"
+	"github.com/p7x-dev/nameless-streamhata-backend/feedback"
 	"github.com/p7x-dev/nameless-streamhata-backend/games"
 	"github.com/p7x-dev/nameless-streamhata-backend/integrations"
 	"github.com/p7x-dev/nameless-streamhata-backend/llm"
@@ -142,6 +143,9 @@ func main() {
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_, _ = response.Write([]byte(`{"ok":true}`))
 	})
+
+	feedbackService := feedback.New(musicDB)
+	feedbackService.RegisterRoutes(srv)
 
 	eventsService := events.New(musicDB)
 	lots.RegisterRoutes(srv)
