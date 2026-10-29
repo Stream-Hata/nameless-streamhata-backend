@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -39,22 +40,30 @@ type Config struct {
 }
 
 type Report struct {
-	Area        string   `json:"area"`
-	Kind        string   `json:"kind"`
-	Reason      string   `json:"reason"`
-	Reasons     []string `json:"reasons"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	Steps       string   `json:"steps"`
-	Expected    string   `json:"expected"`
-	Actual      string   `json:"actual"`
-	Version     string   `json:"version"`
-	Severity    string   `json:"severity"`
-	PageURL     string   `json:"pageUrl"`
-	Environment string   `json:"environment"`
-	Contact     string   `json:"contact"`
-	Author      string   `json:"author"`
-	Website     string   `json:"website"`
+	Area        string               `json:"area"`
+	Kind        string               `json:"kind"`
+	Platform    string               `json:"platform"`
+	Reason      string               `json:"reason"`
+	Reasons     []string             `json:"reasons"`
+	Title       string               `json:"title"`
+	Description string               `json:"description"`
+	Steps       string               `json:"steps"`
+	Expected    string               `json:"expected"`
+	Actual      string               `json:"actual"`
+	Version     string               `json:"version"`
+	Severity    string               `json:"severity"`
+	PageURL     string               `json:"pageUrl"`
+	Environment string               `json:"environment"`
+	Contact     string               `json:"contact"`
+	Author      string               `json:"author"`
+	Website     string               `json:"website"`
+	Attachments []FeedbackAttachment `json:"attachments"`
+}
+
+type FeedbackAttachment struct {
+	Label   string `json:"label"`
+	URL     string `json:"url"`
+	Enabled bool   `json:"enabled"`
 }
 
 type Result struct {
@@ -208,6 +217,17 @@ func (s *Service) validate(report *Report) error {
 	if len([]rune(report.Description)) < 15 {
 		return fmt.Errorf("описание слишком короткое")
 	}
+	if len(report.Attachments) > 10 {
+		return fmt.Errorf("слишком много дополнительных ссылок")
+	}
+	for _, attachment := range report.Attachments {
+		if !attachment.Enabled {
+			continue
+		}
+		if !strings.HasPrefix(attachment.URL, "http://") && !strings.HasPrefix(attachment.URL, "https://") {
+			return fmt.Errorf("ссылка дополнения должна начинаться с http:// или https://")
+		}
+	}
 
 	return nil
 }
@@ -252,7 +272,7 @@ func (s *Service) create(ctx context.Context, report Report) (Result, error) {
 	body := formatBody(report)
 	status := "feedback"
 	if report.Kind != "feedback" {
-		issueURL, issueNumber, err := s.createIssue(ctx, report.Area, title, body)
+		issueURL, issueNumber, err := s.createIssue(ctx, report.Area, report.Kind, report.Severity, title, body)
 		if err != nil {
 			return Result{}, err
 		}
@@ -368,7 +388,28 @@ func githubJWT(appID, privateKey string) (string, error) {
 	return signing + "." + encode(signature), nil
 }
 
-func (s *Service) createIssue(ctx context.Context, area, title, body string) (string, int, error) {
+func (s *Service) ensureLabel(ctx context.Context, repo, name string) error {
+	path := "/repos/" + repo + "/labels/" + url.PathEscape(name)
+	if _, err := s.githubRequest(ctx, http.MethodGet, path, nil); err == nil {
+		return nil
+	}
+	color := map[string]string{
+		"bug":                "d73a4a",
+		"severity: low":      "0e8a16",
+		"severity: medium":   "fbca04",
+		"severity: high":     "d93f0b",
+		"severity: critical": "b60205",
+	}[name]
+	if color == "" {
+		color = "ededed"
+	}
+	body, _ := json.Marshal(map[string]string{"name": name, "color": color})
+	_, err := s.githubRequest(ctx, http.MethodPost, "/repos/"+repo+"/labels", body)
+
+	return err
+}
+
+func (s *Service) createIssue(ctx context.Context, area, kind, severity, title, body string) (string, int, error) {
 	s.mu.Lock()
 	config := s.config
 	s.mu.Unlock()
@@ -385,7 +426,17 @@ func (s *Service) createIssue(ctx context.Context, area, title, body string) (st
 	if assignee == "" {
 		assignee = "p7x-dev"
 	}
-	payload, _ := json.Marshal(map[string]any{"title": title, "body": body, "assignees": []string{assignee}})
+	labels := []string{}
+	if kind == "bug" {
+		labels = append(labels, "bug")
+	}
+	if severity != "" {
+		labels = append(labels, "severity: "+severity)
+	}
+	for _, label := range labels {
+		_ = s.ensureLabel(ctx, repo, label)
+	}
+	payload, _ := json.Marshal(map[string]any{"title": title, "body": body, "assignees": []string{assignee}, "labels": labels})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.github.com/repos/"+repo+"/issues", strings.NewReader(string(payload)))
 	if err != nil {
 		return "", 0, err
@@ -485,6 +536,22 @@ func formatBody(report Report) string {
 			body.WriteString("- " + reason + "\n")
 		}
 	}
+	if report.Platform != "" {
+		body.WriteString("\n### Платформа\n\n" + report.Platform + "\n")
+	}
+	if len(report.Attachments) > 0 {
+		body.WriteString("\n### Дополнения\n\n")
+		for _, attachment := range report.Attachments {
+			if !attachment.Enabled || attachment.URL == "" {
+				continue
+			}
+			label := attachment.Label
+			if label == "" {
+				label = attachment.URL
+			}
+			body.WriteString("- [" + label + "](" + attachment.URL + ")\n")
+		}
+	}
 	body.WriteString("\n### Окружение\n\n")
 	body.WriteString("- Область: " + report.Area + "\n")
 	body.WriteString("- Версия: " + report.Version + "\n")
@@ -520,8 +587,15 @@ func hash(value string) string {
 type githubIssue struct {
 	Number  int    `json:"number"`
 	Title   string `json:"title"`
+	Body    string `json:"body"`
 	HTMLURL string `json:"html_url"`
 	State   string `json:"state"`
+	Labels  []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	Assignees []struct {
+		Login string `json:"login"`
+	} `json:"assignees"`
 }
 
 func (s *Service) githubList(ctx context.Context, repo string) ([]githubIssue, error) {
@@ -565,4 +639,57 @@ func (s *Service) githubRequest(ctx context.Context, method, path string, body [
 		return nil, fmt.Errorf("GitHub: %s", response.Status)
 	}
 	return io.ReadAll(response.Body)
+}
+
+func (s *Service) githubIssue(ctx context.Context, repo string, number int) (githubIssue, error) {
+	body, err := s.githubRequest(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/issues/%d", repo, number), nil)
+	if err != nil {
+		return githubIssue{}, err
+	}
+	var issue githubIssue
+	if err := json.Unmarshal(body, &issue); err != nil {
+		return githubIssue{}, err
+	}
+
+	return issue, nil
+}
+
+type githubComment struct {
+	Body string `json:"body"`
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+}
+
+func (s *Service) githubComments(ctx context.Context, repo string, number int) ([]githubComment, error) {
+	body, err := s.githubRequest(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=30", repo, number), nil)
+	if err != nil {
+		return nil, err
+	}
+	var comments []githubComment
+	if err := json.Unmarshal(body, &comments); err != nil {
+		return nil, err
+	}
+
+	return comments, nil
+}
+
+func (s *Service) githubAddComment(ctx context.Context, repo string, number int, text string) error {
+	body, _ := json.Marshal(map[string]string{"body": text})
+	_, err := s.githubRequest(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number), body)
+
+	return err
+}
+
+func (s *Service) githubUpdateIssue(ctx context.Context, repo string, number int, field, value string) error {
+	payload := map[string]string{}
+	if field == "title" {
+		payload["title"] = value
+	} else {
+		payload["body"] = value
+	}
+	body, _ := json.Marshal(payload)
+	_, err := s.githubRequest(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/issues/%d", repo, number), body)
+
+	return err
 }
