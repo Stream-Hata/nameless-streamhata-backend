@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -54,10 +55,12 @@ type Report struct {
 }
 
 type Result struct {
-	Number int    `json:"number"`
-	Prefix string `json:"prefix"`
-	Issue  string `json:"issueUrl"`
-	Kind   string `json:"kind"`
+	Number      int    `json:"number"`
+	Prefix      string `json:"prefix"`
+	Issue       string `json:"issueUrl"`
+	Kind        string `json:"kind"`
+	Repo        string `json:"repo"`
+	IssueNumber int    `json:"issueNumber"`
 }
 
 type Service struct {
@@ -232,6 +235,10 @@ func (s *Service) create(ctx context.Context, report Report) (Result, error) {
 	}
 
 	result := Result{Number: number, Prefix: prefix, Kind: report.Kind}
+	s.mu.Lock()
+	repo := s.config.Repos[report.Area]
+	s.mu.Unlock()
+	result.Repo = repo
 	title := fmt.Sprintf("%s-%03d %s", prefix, number, report.Title)
 	if report.Author != "" {
 		title += " by " + report.Author
@@ -244,14 +251,14 @@ func (s *Service) create(ctx context.Context, report Report) (Result, error) {
 			return Result{}, err
 		}
 		result.Issue = issueURL
+		result.IssueNumber = issueNumber
 		status = "created"
-		_ = issueNumber
 	}
 	if s.db != nil {
 		_, _ = s.db.ExecContext(ctx, `INSERT INTO feedback_reports
-			(prefix, number, area, kind, title, body, author, issue_url, status)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-			prefix, number, report.Area, report.Kind, title, body, report.Author, result.Issue, status)
+			(prefix, number, area, kind, title, body, author, issue_url, status, repo)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+			prefix, number, report.Area, report.Kind, title, body, report.Author, result.Issue, status, repo)
 	}
 	s.notify(ctx, title, report, result)
 
@@ -365,7 +372,7 @@ func (s *Service) createIssue(ctx context.Context, area, title, body string) (st
 	if err != nil {
 		return "", 0, err
 	}
-	payload, _ := json.Marshal(map[string]string{"title": title, "body": body})
+	payload, _ := json.Marshal(map[string]any{"title": title, "body": body, "assignees": []string{"p7x_dev"}})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.github.com/repos/"+repo+"/issues", strings.NewReader(string(payload)))
 	if err != nil {
 		return "", 0, err
@@ -411,7 +418,14 @@ func (s *Service) notify(ctx context.Context, title string, report Report, resul
 	if result.Issue != "" {
 		text += "\n" + result.Issue
 	}
-	payload, _ := json.Marshal(map[string]any{"chat_id": config.TelegramChat, "text": text, "disable_web_page_preview": false})
+	payloadMap := map[string]any{"chat_id": config.TelegramChat, "text": text, "disable_web_page_preview": false}
+	if result.IssueNumber > 0 {
+		key := fmt.Sprintf("%s-%03d", result.Prefix, result.Number)
+		payloadMap["reply_markup"] = map[string]any{"inline_keyboard": [][]map[string]string{{
+			{"text": "Закрыть issue", "callback_data": "fb:close:" + key},
+		}}}
+	}
+	payload, _ := json.Marshal(payloadMap)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.telegram.org/bot"+config.TelegramToken+"/sendMessage", strings.NewReader(string(payload)))
 	if err != nil {
 		return
@@ -468,4 +482,54 @@ func hash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 
 	return hex.EncodeToString(sum[:])
+}
+
+type githubIssue struct {
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
+}
+
+func (s *Service) githubList(ctx context.Context, repo string) ([]githubIssue, error) {
+	body, err := s.githubRequest(ctx, http.MethodGet, "/repos/"+repo+"/issues?state=open&per_page=10", nil)
+	if err != nil {
+		return nil, err
+	}
+	var issues []githubIssue
+	if err := json.Unmarshal(body, &issues); err != nil {
+		return nil, err
+	}
+
+	return issues, nil
+}
+
+func (s *Service) githubState(ctx context.Context, repo string, number int, state string) error {
+	payload, _ := json.Marshal(map[string]string{"state": state})
+	_, err := s.githubRequest(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/issues/%d", repo, number), payload)
+
+	return err
+}
+
+func (s *Service) githubRequest(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	token, err := s.githubToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, method, "https://api.github.com"+path, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.http.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 300 {
+		return nil, fmt.Errorf("GitHub: %s", response.Status)
+	}
+	return io.ReadAll(response.Body)
 }

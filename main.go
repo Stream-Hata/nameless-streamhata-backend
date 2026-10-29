@@ -163,6 +163,7 @@ func main() {
 
 	feedbackService := feedback.New(musicDB)
 	feedbackService.RegisterRoutes(srv)
+	go feedbackService.BotLoop(ctx)
 
 	eventsService := events.New(musicDB)
 	lots.RegisterRoutes(srv)

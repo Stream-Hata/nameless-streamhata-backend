@@ -140,3 +140,90 @@ func request(client *http.Client, method, target string, body []byte, token stri
 
 	return buffer.Bytes(), nil
 }
+
+// GetSecret читает KV v2 секрет по имени (без secret/data/).
+func GetSecret(name string) (map[string]string, error) {
+	client, token, addr, err := auth()
+	if err != nil {
+		return nil, err
+	}
+
+	payload, err := request(client, http.MethodGet, addr+"/v1/secret/data/"+name, nil, token)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Data struct {
+			Data map[string]string `json:"data"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Data.Data, nil
+}
+
+// PutSecret записывает KV v2 секрет по имени (без secret/data/).
+func PutSecret(name string, data map[string]string) error {
+	client, token, addr, err := auth()
+	if err != nil {
+		return err
+	}
+
+	body, err := json.Marshal(map[string]any{"data": data})
+	if err != nil {
+		return err
+	}
+
+	_, err = request(client, http.MethodPost, addr+"/v1/secret/data/"+name, body, token)
+
+	return err
+}
+
+func auth() (*http.Client, string, string, error) {
+	dir := os.Getenv("CREDENTIALS_DIRECTORY")
+	addr := os.Getenv("OPENBAO_ADDR")
+	if dir == "" || addr == "" {
+		return nil, "", "", fmt.Errorf("openbao не настроен")
+	}
+
+	body, err := os.ReadFile(filepath.Join(dir, roleFile))
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	var role approle
+	if err := json.Unmarshal(body, &role); err != nil {
+		return nil, "", "", err
+	}
+
+	client, err := client()
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	loginBody, _ := json.Marshal(map[string]string{
+		"role_id":   role.RoleID,
+		"secret_id": role.SecretID,
+	})
+	login, err := request(client, http.MethodPost, addr+"/v1/auth/approle/login", loginBody, "")
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	var loginResponse struct {
+		Auth struct {
+			ClientToken string `json:"client_token"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(login, &loginResponse); err != nil {
+		return nil, "", "", err
+	}
+	if loginResponse.Auth.ClientToken == "" {
+		return nil, "", "", fmt.Errorf("openbao: empty client token")
+	}
+
+	return client, loginResponse.Auth.ClientToken, addr, nil
+}
