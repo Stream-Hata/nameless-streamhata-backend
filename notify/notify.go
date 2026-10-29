@@ -190,9 +190,15 @@ func (s *Service) telegramAllChatIDs() []string {
 }
 
 func (s *Service) isTelegramChat(chat TelegramChat) bool {
-	// Бот отвечает в любом чате, куда его добавили. Список chat ID
-	// используется только для исходящих уведомлений.
-	return chat.ID != 0
+	// Бот отвечает только в чатах, привязанных к аккаунту стримера.
+	chatID := fmt.Sprintf("%d", chat.ID)
+	for _, id := range s.telegramChatIDs() {
+		if id == chatID {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *Service) load() {
