@@ -31,6 +31,7 @@ type Config struct {
 	GitHubAppID          string            `json:"githubAppId"`
 	GitHubInstallationID string            `json:"githubInstallationId"`
 	GitHubPrivateKey     string            `json:"githubPrivateKey"`
+	GitHubAssignee       string            `json:"githubAssignee"`
 	TelegramToken        string            `json:"telegramToken"`
 	TelegramChat         string            `json:"telegramChat"`
 	TelegramOwner        string            `json:"telegramOwner"`
@@ -89,7 +90,8 @@ func New(db *sql.DB) *Service {
 
 func defaultConfig() Config {
 	return Config{
-		TelegramOwner: "p7x_dev",
+		TelegramOwner:  "p7x_dev",
+		GitHubAssignee: "p7x-dev",
 		Repos: map[string]string{
 			"backend":  "Stream-Hata/nameless-streamhata-backend",
 			"frontend": "Stream-Hata/stream-hata-frontend",
@@ -333,9 +335,12 @@ func (s *Service) githubToken(ctx context.Context) (string, error) {
 }
 
 func githubJWT(appID, privateKey string) (string, error) {
+	privateKey = strings.TrimSpace(privateKey)
+	privateKey = strings.ReplaceAll(privateKey, `\n`, "\n")
+	privateKey = strings.ReplaceAll(privateKey, `\r`, "")
 	block, _ := pem.Decode([]byte(privateKey))
 	if block == nil {
-		return "", fmt.Errorf("неверный приватный ключ GitHub App")
+		return "", fmt.Errorf("неверный приватный ключ GitHub App: PEM не распознан")
 	}
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
@@ -376,7 +381,11 @@ func (s *Service) createIssue(ctx context.Context, area, title, body string) (st
 	if err != nil {
 		return "", 0, err
 	}
-	payload, _ := json.Marshal(map[string]any{"title": title, "body": body, "assignees": []string{"p7x_dev"}})
+	assignee := strings.TrimSpace(config.GitHubAssignee)
+	if assignee == "" {
+		assignee = "p7x-dev"
+	}
+	payload, _ := json.Marshal(map[string]any{"title": title, "body": body, "assignees": []string{assignee}})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.github.com/repos/"+repo+"/issues", strings.NewReader(string(payload)))
 	if err != nil {
 		return "", 0, err
@@ -392,10 +401,23 @@ func (s *Service) createIssue(ctx context.Context, area, title, body string) (st
 	if response.StatusCode >= 300 {
 		var errorPayload struct {
 			Message string `json:"message"`
+			Errors  []struct {
+				Resource string `json:"resource"`
+				Field    string `json:"field"`
+				Code     string `json:"code"`
+				Message  string `json:"message"`
+			} `json:"errors"`
 		}
 		_ = json.NewDecoder(response.Body).Decode(&errorPayload)
 		if errorPayload.Message == "" {
 			errorPayload.Message = response.Status
+		}
+		details := make([]string, 0, len(errorPayload.Errors))
+		for _, item := range errorPayload.Errors {
+			details = append(details, strings.TrimSpace(strings.Join([]string{item.Resource, item.Field, item.Code, item.Message}, " ")))
+		}
+		if len(details) > 0 {
+			errorPayload.Message += ": " + strings.Join(details, "; ")
 		}
 
 		return "", 0, fmt.Errorf("GitHub: %s", errorPayload.Message)
