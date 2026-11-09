@@ -74,7 +74,10 @@ jobs:
               chmod 755 /opt/streamhata/statuspage
               sudo -n systemctl start streamhata-statuspage
             fi
-            sleep 3
+            for i in $(seq 1 30); do
+              if curl -fsS -H "Host: streamhata.rdpctd.dev" http://127.0.0.1:3000/health >/dev/null; then break; fi
+              sleep 1
+            done
             curl -fsS -H "Host: streamhata.rdpctd.dev" http://127.0.0.1:3000/health
             rm -f /opt/streamhata/backend.prev* /opt/streamhata/statuspage.prev*
           '
@@ -93,7 +96,10 @@ jobs:
             mv -f /opt/streamhata/backend.new /opt/streamhata/backend
             chmod 755 /opt/streamhata/backend
             sudo -n systemctl start streamhata-backend
-            sleep 3
+            for i in $(seq 1 30); do
+              if curl -fsS -H "Host: streamhata.rdpctd.dev" http://127.0.0.1:3000/health >/dev/null; then break; fi
+              sleep 1
+            done
             curl -fsS -H "Host: streamhata.rdpctd.dev" http://127.0.0.1:3000/health
             rm -f /opt/streamhata/backend.prev*
           '
