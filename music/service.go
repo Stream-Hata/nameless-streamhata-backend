@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -78,6 +79,7 @@ func NewService(db *sql.DB) *Service {
 	}
 
 	service.loadFromDB()
+	service.loadCurrent()
 
 	return service
 }
@@ -210,13 +212,48 @@ func (s *Service) SetCurrent(videoID string) {
 
 	if videoID == "" {
 		s.current = ""
+		s.persistCurrentLocked()
 
 		return
 	}
 
 	if _, ok := s.tracks[videoID]; ok {
 		s.current = videoID
+		s.persistCurrentLocked()
 	}
+}
+
+func (s *Service) loadCurrent() {
+	if s.db == nil {
+		return
+	}
+
+	var raw []byte
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'music_current'`).Scan(&raw); err != nil {
+		return
+	}
+
+	var videoID string
+	if json.Unmarshal(raw, &videoID) != nil {
+		videoID = strings.Trim(string(raw), "\"")
+	}
+
+	if _, ok := s.tracks[videoID]; ok {
+		s.current = videoID
+	}
+}
+
+func (s *Service) persistCurrentLocked() {
+	if s.db == nil {
+		return
+	}
+
+	raw, err := json.Marshal(s.current)
+	if err != nil {
+		return
+	}
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('music_current', $1)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
 }
 
 // Current возвращает текущий трек, если он ещё есть в списке.

@@ -237,6 +237,22 @@ func Migrate() error {
 		_ = db.Close()
 	}()
 
+	const migrationLockKey int64 = 0x53545245414d
+
+	lockConnection, err := db.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	if _, err := lockConnection.ExecContext(context.Background(), `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
+		_ = lockConnection.Close()
+
+		return err
+	}
+	defer func() {
+		_, _ = lockConnection.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationLockKey)
+		_ = lockConnection.Close()
+	}()
+
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS migrations (
 			id serial PRIMARY KEY,

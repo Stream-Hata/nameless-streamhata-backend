@@ -43,13 +43,26 @@ func RegisterRoutes(srv Deps, service *Service) {
 				return
 			}
 
-			videoID, ok := ExtractVideoID(body.URL)
+			if videoID, ok := ExtractVideoID(body.URL); ok {
+				track, err := service.Add(request.Context(), videoID, body.URL, body.AddedBy)
+				if err != nil {
+					writeJSON(response, http.StatusBadRequest, map[string]string{"error": err.Error()})
 
-			if !ok {
-				videoID = strings.TrimSpace(body.URL)
+					return
+				}
+
+				writeJSON(response, http.StatusOK, track)
+
+				return
 			}
 
-			track, err := service.Add(request.Context(), videoID, body.URL, body.AddedBy)
+			mediaURL, kind, ok := ExtractLink(body.URL)
+			if !ok {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "нужна ссылка YouTube или прямой аудио/видео URL"})
+
+				return
+			}
+			track, err := service.AddMedia(mediaURL, kind, body.AddedBy)
 			if err != nil {
 				writeJSON(response, http.StatusBadRequest, map[string]string{"error": err.Error()})
 

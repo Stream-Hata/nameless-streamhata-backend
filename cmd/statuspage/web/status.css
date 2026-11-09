@@ -1,0 +1,152 @@
+:root {
+	color-scheme: dark;
+	--bg: #0d1117;
+	--panel: #161b22;
+	--panel-2: #1f2630;
+	--border: #30363d;
+	--text: #e6edf3;
+	--muted: #8b949e;
+	--green: #3fb950;
+	--yellow: #d29922;
+	--red: #f85149;
+	--blue: #58a6ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--text);
+	font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.page {
+	width: min(980px, calc(100% - 32px));
+	margin: 48px auto;
+}
+
+.topbar,
+.section-head,
+.overall,
+.service-head,
+.incident-head,
+.incident-meta {
+	display: flex;
+	justify-content: space-between;
+	gap: 16px;
+	align-items: center;
+}
+
+.topbar h1,
+.section-head h2 {
+	margin: 0;
+}
+
+.eyebrow,
+.label,
+.muted {
+	color: var(--muted);
+	font-size: 13px;
+}
+
+button {
+	padding: 8px 14px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--panel-2);
+	color: var(--text);
+	cursor: pointer;
+}
+
+button:hover { border-color: var(--blue); }
+
+.overall,
+.card {
+	margin-top: 20px;
+	padding: 20px;
+	border: 1px solid var(--border);
+	border-radius: 14px;
+	background: var(--panel);
+}
+
+.overall {
+	border-left: 4px solid var(--border);
+}
+
+.overall strong { display: block; margin-top: 4px; font-size: 22px; }
+.overall.operational { border-left-color: var(--green); }
+.overall.degraded { border-left-color: var(--yellow); }
+.overall.down { border-left-color: var(--red); }
+
+.services,
+.incidents {
+	display: grid;
+	gap: 10px;
+	margin-top: 16px;
+}
+
+.services { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+
+.service,
+.incident {
+	padding: 14px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--panel-2);
+}
+
+.service-head strong { font-size: 14px; }
+
+.pill {
+	padding: 3px 8px;
+	border-radius: 999px;
+	background: #21262d;
+	font-size: 12px;
+	white-space: nowrap;
+}
+
+.operational .pill { color: var(--green); }
+.degraded .pill { color: var(--yellow); }
+.down .pill,
+.investigating .pill,
+.identified .pill { color: var(--red); }
+.resolved .pill,
+.monitoring .pill { color: var(--green); }
+
+.incident h3 { margin: 10px 0 6px; font-size: 16px; }
+.incident-names { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.code {
+	padding: 2px 6px;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	font: 12px ui-monospace, SFMono-Regular, Consolas, monospace;
+	color: var(--blue);
+}
+.incident-meta { justify-content: flex-start; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 12px; }
+.error { color: var(--red); }
+
+.top-actions { display: flex; gap: 10px; align-items: center; }
+.admin-link { color: var(--muted); font-size: 13px; }
+.admin-link:hover { color: var(--blue); }
+.uptime { margin-top: 8px; color: var(--green); font-size: 12px; font-weight: 600; }
+.detail-button { padding: 4px 8px; border: 0; background: transparent; color: var(--blue); font-size: 12px; cursor: pointer; }
+.hidden { display: none; }
+.timeline-title { margin-top: 24px; }
+.timeline { display: grid; gap: 14px; margin-top: 12px; }
+.timeline-item { display: flex; gap: 12px; align-items: flex-start; }
+.timeline-dot { width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+.timeline-dot.resolved { background: var(--green); }
+.timeline-dot.investigating, .timeline-dot.identified { background: var(--red); }
+.timeline-dot.monitoring { background: var(--yellow); }
+.timeline-item .muted { display: block; margin-top: 3px; }
+
+.admin-card { display: grid; gap: 14px; }
+.admin-card label { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
+.admin-card input, .admin-card select, .admin-card textarea { width: 100%; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); font: inherit; }
+.admin-card textarea { resize: vertical; }
+.admin-card button { justify-self: start; }
+.admin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.admin-form { display: grid; gap: 12px; }
+.admin-actions { display: flex; gap: 10px; }
+@media (max-width: 600px) { .admin-grid { grid-template-columns: 1fr; } }

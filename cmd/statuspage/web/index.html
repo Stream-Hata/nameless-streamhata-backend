@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Статус StreamHata</title>
+	<link rel="icon" href="data:,">
+	<link rel="stylesheet" href="status.css">
+</head>
+<body>
+	<main class="page">
+		<header class="topbar">
+			<div>
+				<div class="eyebrow">StreamHata</div>
+				<h1>Статус сервисов</h1>
+			</div>
+			<div class="top-actions">
+				<button id="refresh" type="button">Обновить</button>
+			</div>
+		</header>
+
+		<section id="overall" class="overall loading">
+			<div>
+				<span class="label">Общий статус</span>
+				<strong id="overall-label">Загрузка…</strong>
+			</div>
+			<span id="checked-at" class="muted"></span>
+		</section>
+
+		<section class="card">
+			<div class="section-head">
+				<h2>Сервисы</h2>
+				<span class="muted">Проверка каждые 30 секунд</span>
+			</div>
+			<div id="services" class="services"></div>
+		</section>
+
+		<section class="card">
+			<div class="section-head">
+				<h2>Инциденты</h2>
+				<span class="muted">UP — доступность за 15 дней</span>
+			</div>
+			<div id="incidents" class="incidents"></div>
+		</section>
+
+		<section id="detail" class="card detail hidden">
+			<div class="section-head">
+				<h2 id="detail-title">Инцидент</h2>
+				<button id="detail-close" type="button">Закрыть</button>
+			</div>
+			<div id="detail-body"></div>
+		</section>
+	</main>
+	<script src="status.js"></script>
+</body>
+</html>

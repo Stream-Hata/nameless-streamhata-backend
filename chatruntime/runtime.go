@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -158,6 +159,93 @@ func (r *Runtime) Say(text string) error {
 	}
 
 	return irc.Say(text)
+}
+
+func (r *Runtime) CurrentChannelLogin() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.broadcaster.Login
+}
+
+// SayTo отправляет сообщение в чат произвольного Twitch-канала от имени
+// авторизованного стримера. Получателю не нужен StreamHata.
+func (r *Runtime) SayTo(ctx context.Context, channel, text string) error {
+	token, senderID, err := r.credentials()
+	if err != nil {
+		return err
+	}
+	channel = strings.TrimPrefix(strings.TrimSpace(channel), "#")
+	if channel == "" {
+		return errors.New("chat: empty channel")
+	}
+
+	userRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, usersURL+"?login="+url.QueryEscape(channel), nil)
+	if err != nil {
+		return err
+	}
+	userRequest.Header.Set("Authorization", "Bearer "+token)
+	userRequest.Header.Set("Client-Id", r.clientID)
+
+	var users helixUsersResponse
+	if err := r.doJSON(userRequest, &users); err != nil {
+		return err
+	}
+	if len(users.Data) == 0 {
+		return fmt.Errorf("chat: channel %s not found", channel)
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"broadcaster_id": users.Data[0].ID,
+		"sender_id":      senderID,
+		"message":        text,
+	})
+	if err != nil {
+		return err
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.twitch.tv/helix/chat/messages", strings.NewReader(string(payload)))
+		if err != nil {
+			return err
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Client-Id", r.clientID)
+		request.Header.Set("Content-Type", "application/json")
+
+		response, err := r.http.Do(request)
+		if err != nil {
+			return err
+		}
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		_ = response.Body.Close()
+
+		if response.StatusCode == http.StatusUnauthorized && attempt == 0 {
+			if refreshErr := r.Reconnect(ctx); refreshErr != nil {
+				return fmt.Errorf("chat token refresh failed: %w", refreshErr)
+			}
+			token, senderID, err = r.credentials()
+			if err != nil {
+				return err
+			}
+			payload, _ = json.Marshal(map[string]string{
+				"broadcaster_id": users.Data[0].ID,
+				"sender_id":      senderID,
+				"message":        text,
+			})
+			continue
+		}
+		if response.StatusCode != http.StatusOK {
+			return fmt.Errorf("chat messages returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		}
+		r.mu.Lock()
+		r.sent[text] = time.Now()
+		r.mu.Unlock()
+
+		return nil
+	}
+
+	return errors.New("chat: unauthorized after token refresh")
 }
 
 func (r *Runtime) sayAPI(text string) error {

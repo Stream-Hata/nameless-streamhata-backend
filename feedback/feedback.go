@@ -12,15 +12,25 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	data_base "github.com/p7x-dev/nameless-streamhata-backend/data-base"
+	"github.com/p7x-dev/nameless-streamhata-backend/netcfg"
 	"github.com/p7x-dev/nameless-streamhata-backend/vaultsecrets"
+)
+
+var (
+	errUnauthorized = errors.New("unauthorized")
+	errForbidden    = errors.New("forbidden")
 )
 
 type Deps interface {
@@ -36,6 +46,10 @@ type Config struct {
 	TelegramToken        string            `json:"telegramToken"`
 	TelegramChat         string            `json:"telegramChat"`
 	TelegramOwner        string            `json:"telegramOwner"`
+	TelegramUserToken    string            `json:"telegramUserToken"`
+	TelegramUserUsername string            `json:"telegramUserUsername"`
+	AlertWebhookToken    string            `json:"alertWebhookToken"`
+	ConfigToken          string            `json:"configToken"`
 	Repos                map[string]string `json:"repos"`
 }
 
@@ -43,6 +57,7 @@ type Report struct {
 	Area        string               `json:"area"`
 	Kind        string               `json:"kind"`
 	Platform    string               `json:"platform"`
+	OS          string               `json:"os"`
 	Reason      string               `json:"reason"`
 	Reasons     []string             `json:"reasons"`
 	Title       string               `json:"title"`
@@ -58,6 +73,14 @@ type Report struct {
 	Author      string               `json:"author"`
 	Website     string               `json:"website"`
 	Attachments []FeedbackAttachment `json:"attachments"`
+	Diagnostics DiagnosticsRequest   `json:"diagnostics"`
+	Logs        string               `json:"-"`
+}
+
+type DiagnosticsRequest struct {
+	Enabled bool     `json:"enabled"`
+	Period  string   `json:"period"`
+	Sources []string `json:"sources"`
 }
 
 type FeedbackAttachment struct {
@@ -77,24 +100,49 @@ type Result struct {
 
 type Service struct {
 	db              *sql.DB
+	users           data_base.Database[data_base.User]
+	tokens          data_base.Database[data_base.Token]
 	mu              sync.Mutex
 	config          Config
 	installationJWT string
 	installationEnd time.Time
 	lastSeen        map[string]time.Time
+	watchMu         sync.Mutex
+	issueSnapshots  map[string]issueSnapshot
 	http            *http.Client
+	lokiURL         string
+	prometheusURL   string
 }
 
-func New(db *sql.DB) *Service {
+func New(db *sql.DB, users data_base.Database[data_base.User], tokens data_base.Database[data_base.Token]) *Service {
 	service := &Service{
-		db:       db,
-		config:   defaultConfig(),
-		lastSeen: make(map[string]time.Time),
-		http:     &http.Client{Timeout: 20 * time.Second},
+		db:             db,
+		users:          users,
+		tokens:         tokens,
+		config:         defaultConfig(),
+		lastSeen:       make(map[string]time.Time),
+		issueSnapshots: make(map[string]issueSnapshot),
+		http:           newHTTPClient(),
+		lokiURL:        envOr("LOKI_URL", "http://10.66.0.2:3100"),
+		prometheusURL:  envOr("PROMETHEUS_URL", "http://10.66.0.2:9090"),
 	}
 	service.load()
 
 	return service
+}
+
+func newHTTPClient() *http.Client {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+
+	return &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			Proxy: netcfg.ProxyFunc(),
+			DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "tcp4", address)
+			},
+		},
+	}
 }
 
 func defaultConfig() Config {
@@ -114,6 +162,27 @@ func (s *Service) TelegramToken() string {
 	defer s.mu.Unlock()
 
 	return strings.TrimSpace(s.config.TelegramToken)
+}
+
+func (s *Service) userTelegram() (string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return strings.TrimSpace(s.config.TelegramUserToken), strings.TrimSpace(s.config.TelegramUserUsername)
+}
+
+func (s *Service) alertWebhookToken() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return strings.TrimSpace(s.config.AlertWebhookToken)
+}
+
+func (s *Service) configToken() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return strings.TrimSpace(s.config.ConfigToken)
 }
 
 func (s *Service) load() {
@@ -159,6 +228,10 @@ func (s *Service) save() error {
 func (s *Service) RegisterRoutes(srv Deps) {
 	s.registerConfigRoute(srv)
 	srv.ServeEndpoint("/rgg-sync/feedback", s.createHandler)
+	srv.ServeEndpoint("/rgg-sync/feedback/mine", s.mineHandler)
+	srv.ServeEndpoint("/rgg-sync/feedback/similar", s.similarHandler)
+	srv.ServeEndpoint("/rgg-sync/alerts/grafana", s.grafanaAlertHandler)
+	srv.ServeEndpoint("/rgg-sync/feedback/telegram-link", s.telegramLinkHandler)
 }
 
 func (s *Service) createHandler(response http.ResponseWriter, request *http.Request) {
@@ -176,6 +249,22 @@ func (s *Service) createHandler(response http.ResponseWriter, request *http.Requ
 	}
 	if report.Website != "" {
 		writeJSON(response, http.StatusOK, map[string]string{"ok": "true"})
+
+		return
+	}
+	user, err := s.sessionUser(request)
+	if err != nil {
+		status := http.StatusUnauthorized
+		if errors.Is(err, errForbidden) {
+			status = http.StatusForbidden
+		}
+		writeJSON(response, status, map[string]string{"error": "войдите через Twitch"})
+
+		return
+	}
+	report.Author = strings.TrimSpace(user.Username)
+	if report.Author == "" {
+		writeJSON(response, http.StatusForbidden, map[string]string{"error": "Twitch-логин не найден"})
 
 		return
 	}
@@ -228,8 +317,53 @@ func (s *Service) validate(report *Report) error {
 			return fmt.Errorf("ссылка дополнения должна начинаться с http:// или https://")
 		}
 	}
+	if report.Diagnostics.Enabled {
+		if _, ok := diagnosticsPeriods[report.Diagnostics.Period]; !ok {
+			return fmt.Errorf("выберите период диагностики: 15m, 1h, 6h или 24h")
+		}
+		if len(report.Diagnostics.Sources) == 0 {
+			return fmt.Errorf("выберите хотя бы один источник диагностики")
+		}
+		for _, source := range report.Diagnostics.Sources {
+			if !diagnosticsSourceAllowed(source) {
+				return fmt.Errorf("неизвестный источник диагностики: %s", source)
+			}
+		}
+	}
 
 	return nil
+}
+
+func (s *Service) sessionUser(request *http.Request) (*data_base.User, error) {
+	if s.users == nil || s.tokens == nil {
+		return nil, errUnauthorized
+	}
+
+	cookie, err := request.Cookie("e-hub-refresh-token")
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return nil, errUnauthorized
+	}
+
+	token, err := s.tokens.Find(data_base.Where{
+		Column: "refresh_token",
+		Value:  cookie.Value,
+	})
+	if err != nil || token == nil {
+		return nil, errUnauthorized
+	}
+
+	user, err := s.users.Find(data_base.Where{
+		Column: "id",
+		Value:  token.UserID,
+	})
+	if err != nil || user == nil {
+		return nil, errUnauthorized
+	}
+	if user.Banned {
+		return nil, errForbidden
+	}
+
+	return user, nil
 }
 
 func (s *Service) allow(remote string) bool {
@@ -267,9 +401,15 @@ func (s *Service) create(ctx context.Context, report Report) (Result, error) {
 	result.Repo = repo
 	title := fmt.Sprintf("%s-%03d %s", prefix, number, report.Title)
 	if report.Author != "" {
-		title += " by " + report.Author
+		title += " (by " + report.Author + ")"
 	}
-	body := formatBody(report)
+	title = truncateRunes(title, 240)
+	if report.Diagnostics.Enabled {
+		diagnosticsCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		report.Logs = s.collectDiagnostics(diagnosticsCtx, report.Diagnostics, report.Author)
+		cancel()
+	}
+	body := truncateRunes(formatBody(report), 60000)
 	status := "feedback"
 	if report.Kind != "feedback" {
 		issueURL, issueNumber, err := s.createIssue(ctx, report.Area, report.Kind, report.Severity, title, body)
@@ -282,9 +422,9 @@ func (s *Service) create(ctx context.Context, report Report) (Result, error) {
 	}
 	if s.db != nil {
 		_, _ = s.db.ExecContext(ctx, `INSERT INTO feedback_reports
-			(prefix, number, area, kind, title, body, author, issue_url, status, repo)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-			prefix, number, report.Area, report.Kind, title, body, report.Author, result.Issue, status, repo)
+			(prefix, number, area, kind, title, body, logs, author, issue_url, status, repo)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			prefix, number, report.Area, report.Kind, title, body, report.Logs, report.Author, result.Issue, status, repo)
 	}
 	s.notify(ctx, title, report, result)
 
@@ -539,6 +679,9 @@ func formatBody(report Report) string {
 	if report.Platform != "" {
 		body.WriteString("\n### Платформа\n\n" + report.Platform + "\n")
 	}
+	if report.OS != "" {
+		body.WriteString("\n### ОС\n\n" + report.OS + "\n")
+	}
 	if len(report.Attachments) > 0 {
 		body.WriteString("\n### Дополнения\n\n")
 		for _, attachment := range report.Attachments {
@@ -567,6 +710,11 @@ func formatBody(report Report) string {
 	body.WriteString("- Автор: " + report.Author + "\n")
 	if report.Contact != "" {
 		body.WriteString("- Контакт: " + report.Contact + "\n")
+	}
+	if report.Logs != "" {
+		body.WriteString("\n### Диагностика\n\n```text\n")
+		body.WriteString(report.Logs)
+		body.WriteString("\n```\n")
 	}
 
 	return body.String()
@@ -608,8 +756,11 @@ type githubIssue struct {
 	} `json:"assignees"`
 }
 
-func (s *Service) githubList(ctx context.Context, repo string) ([]githubIssue, error) {
-	body, err := s.githubRequest(ctx, http.MethodGet, "/repos/"+repo+"/issues?state=open&per_page=10", nil)
+func (s *Service) githubList(ctx context.Context, repo, state string) ([]githubIssue, error) {
+	if state != "closed" {
+		state = "open"
+	}
+	body, err := s.githubRequest(ctx, http.MethodGet, "/repos/"+repo+"/issues?state="+state+"&per_page=10", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -692,14 +843,36 @@ func (s *Service) githubAddComment(ctx context.Context, repo string, number int,
 }
 
 func (s *Service) githubUpdateIssue(ctx context.Context, repo string, number int, field, value string) error {
-	payload := map[string]string{}
-	if field == "title" {
-		payload["title"] = value
-	} else {
-		payload["body"] = value
-	}
+	return s.githubUpdateFields(ctx, repo, number, map[string]any{field: value})
+}
+
+func (s *Service) githubUpdateFields(ctx context.Context, repo string, number int, payload map[string]any) error {
 	body, _ := json.Marshal(payload)
 	_, err := s.githubRequest(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/issues/%d", repo, number), body)
 
 	return err
+}
+
+func (s *Service) githubMilestoneNumber(ctx context.Context, repo, value string) (int, error) {
+	if number, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+		return number, nil
+	}
+	body, err := s.githubRequest(ctx, http.MethodGet, "/repos/"+repo+"/milestones?state=all&per_page=100", nil)
+	if err != nil {
+		return 0, err
+	}
+	var milestones []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+	}
+	if err := json.Unmarshal(body, &milestones); err != nil {
+		return 0, err
+	}
+	for _, milestone := range milestones {
+		if strings.EqualFold(milestone.Title, strings.TrimSpace(value)) {
+			return milestone.Number, nil
+		}
+	}
+
+	return 0, fmt.Errorf("не найден")
 }

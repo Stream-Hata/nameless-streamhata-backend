@@ -1,0 +1,99 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '**/*.go'
+      - 'migrations/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      PRIMARY_HOST: ${{ secrets.STREAMHATA_PRIMARY_HOST || secrets.STREAMHATA_SSH_HOST }}
+      SECONDARY_HOST: ${{ secrets.STREAMHATA_SECONDARY_HOST || secrets.STREAMHATA_SSH_HOST_SECONDARY }}
+      SSH_PORT: ${{ secrets.STREAMHATA_SSH_PORT }}
+      SSH_USER: deploy
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go test ./...
+      - run: go vet ./...
+
+      - name: Build
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" -o streamhata-backend .
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" -o streamhata-statuspage ./cmd/statuspage
+
+      - name: Install SSH key
+        run: |
+          set -euo pipefail
+          : "${PRIMARY_HOST:?STREAMHATA_PRIMARY_HOST is required}"
+          : "${SSH_USER:?STREAMHATA_SSH_USER is required}"
+          port="${SSH_PORT:-22}"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.STREAMHATA_SSH_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          ssh-keyscan -p "$port" "$PRIMARY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy primary
+        run: |
+          set -euo pipefail
+          port="${SSH_PORT:-22}"
+          scp -P "$port" -i ~/.ssh/deploy streamhata-backend "$SSH_USER@$PRIMARY_HOST:/opt/streamhata/backend.new"
+          scp -P "$port" -i ~/.ssh/deploy streamhata-statuspage "$SSH_USER@$PRIMARY_HOST:/opt/streamhata/statuspage.new"
+          scp -P "$port" -i ~/.ssh/deploy migrations/*.sql "$SSH_USER@$PRIMARY_HOST:/opt/streamhata/migrations/"
+          ssh -p "$port" -i ~/.ssh/deploy "$SSH_USER@$PRIMARY_HOST" '
+            set -euo pipefail
+            sudo -n systemctl stop streamhata-backend
+            mv -f /opt/streamhata/backend.new /opt/streamhata/backend
+            chmod 755 /opt/streamhata/backend
+            sudo -n systemctl start streamhata-backend
+            if [ -f /opt/streamhata/statuspage.new ]; then
+              sudo -n systemctl stop streamhata-statuspage
+              mv -f /opt/streamhata/statuspage.new /opt/streamhata/statuspage
+              chmod 755 /opt/streamhata/statuspage
+              sudo -n systemctl start streamhata-statuspage
+            fi
+            sleep 3
+            curl -fsS -H "Host: streamhata.rdpctd.dev" http://127.0.0.1:3000/health
+            rm -f /opt/streamhata/backend.prev* /opt/streamhata/statuspage.prev*
+          '
+
+      - name: Deploy secondary
+        if: ${{ env.SECONDARY_HOST != '' }}
+        run: |
+          set -euo pipefail
+          port="${SSH_PORT:-22}"
+          proxy="ssh -p $port -i ~/.ssh/deploy -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -W %h:%p $SSH_USER@$PRIMARY_HOST"
+          scp -P "$port" -i ~/.ssh/deploy -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyCommand="$proxy" streamhata-backend "$SSH_USER@$SECONDARY_HOST:/opt/streamhata/backend.new"
+          scp -P "$port" -i ~/.ssh/deploy -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyCommand="$proxy" migrations/*.sql "$SSH_USER@$SECONDARY_HOST:/opt/streamhata/migrations/"
+          ssh -p "$port" -i ~/.ssh/deploy -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyCommand="$proxy" "$SSH_USER@$SECONDARY_HOST" '
+            set -euo pipefail
+            sudo -n systemctl stop streamhata-backend
+            mv -f /opt/streamhata/backend.new /opt/streamhata/backend
+            chmod 755 /opt/streamhata/backend
+            sudo -n systemctl start streamhata-backend
+            sleep 3
+            curl -fsS -H "Host: streamhata.rdpctd.dev" http://127.0.0.1:3000/health
+            rm -f /opt/streamhata/backend.prev*
+          '

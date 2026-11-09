@@ -1,0 +1,1 @@
+ALTER TABLE feedback_reports ADD COLUMN IF NOT EXISTS logs text NOT NULL DEFAULT '';

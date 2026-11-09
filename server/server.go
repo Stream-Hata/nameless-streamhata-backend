@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -57,7 +58,10 @@ func NewServer(ctx context.Context) Server {
 }
 
 func (s *server) Shutdown() error {
-	return s.srv.Shutdown(s.ctx)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	return s.srv.Shutdown(ctx)
 }
 
 func (s *server) ServeEndpoint(name string, h http.HandlerFunc) {

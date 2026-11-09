@@ -394,7 +394,7 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 	s.mu.Unlock()
 
 	s.persist(*command)
-	s.execute(*command, message, s.expand(response, message))
+	s.execute(*command, message, s.expandDepth(response, message, 0, command.Counter))
 }
 
 func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
@@ -408,7 +408,7 @@ func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
 		snapshot := *command
 		response := render(snapshot.Response, message, snapshot.Counter+1)
 		s.mu.Unlock()
-		s.execute(snapshot, message, s.expand(response, message))
+		s.execute(snapshot, message, s.expandDepth(response, message, 0, snapshot.Counter+1))
 
 		return true
 	}
@@ -421,13 +421,15 @@ func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
 var variablePattern = regexp.MustCompile(`\$\(([a-zA-Z0-9_]+)\)|\$\{([a-zA-Z0-9_]+)\}`)
 
 func (s *Service) expand(text string, message twitch.TwitchChatMessage) string {
-	return s.expandDepth(text, message, 0)
+	return s.expandDepth(text, message, 0, 0)
 }
 
-func (s *Service) expandDepth(text string, message twitch.TwitchChatMessage, depth int) string {
+func (s *Service) expandDepth(text string, message twitch.TwitchChatMessage, depth, counter int) string {
 	if text == "" || depth > 10 {
 		return text
 	}
+
+	text = s.evaluateExpressions(text, message, counter)
 
 	return variablePattern.ReplaceAllStringFunc(text, func(match string) string {
 		name := strings.TrimSuffix(strings.TrimPrefix(match, "$("), ")")
@@ -447,7 +449,7 @@ func (s *Service) expandDepth(text string, message twitch.TwitchChatMessage, dep
 			}
 
 			if variable.Value != "" {
-				return s.expandDepth(variable.Value, message, depth+1)
+				return s.expandDepth(variable.Value, message, depth+1, counter)
 			}
 		}
 

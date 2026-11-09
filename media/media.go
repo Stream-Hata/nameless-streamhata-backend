@@ -1,11 +1,14 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +19,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/disintegration/imaging"
 
 	"github.com/p7x-dev/nameless-streamhata-backend/netcfg"
 )
@@ -35,6 +40,109 @@ var (
 	imagePattern      = regexp.MustCompile(`(?i)<meta[^>]+(?:property|name)=["'](?:og:image|og:video|twitter:image)["'][^>]+content=["']([^"']+)["']`)
 	imagePattern2     = regexp.MustCompile(`(?i)<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:image|og:video|twitter:image)["']`)
 )
+
+// UploadDirectory returns the persistent directory for user uploads.
+func UploadDirectory() string {
+	directory := strings.TrimSpace(os.Getenv("MEDIA_UPLOAD_DIR"))
+	if directory == "" {
+		directory = "uploads"
+	}
+
+	return directory
+}
+
+// SaveImage resizes large JPEG/PNG images before storing them. Other formats
+// are stored as-is so animated and vector files keep their original content.
+func SaveImage(file io.Reader, filename string, maxDimension int, allowed map[string]bool) (string, error) {
+	extension := strings.ToLower(filepath.Ext(filepath.Base(filename)))
+	if extension != ".jpg" && extension != ".jpeg" && extension != ".png" {
+		return SaveFile(file, filename, allowed)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(file, 30<<20))
+	if err != nil {
+		return "", fmt.Errorf("failed to read image: %w", err)
+	}
+
+	image, err := imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+	if err != nil {
+		return "", fmt.Errorf("invalid image")
+	}
+
+	bounds := image.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	changed := false
+
+	if width > maxDimension || height > maxDimension {
+		image = imaging.Fit(image, maxDimension, maxDimension, imaging.Lanczos)
+		changed = true
+	}
+
+	var encoded bytes.Buffer
+	if extension == ".png" {
+		if err := png.Encode(&encoded, image); err != nil {
+			return "", fmt.Errorf("failed to encode image")
+		}
+	} else if err := jpeg.Encode(&encoded, image, &jpeg.Options{Quality: 85}); err != nil {
+		return "", fmt.Errorf("failed to encode image")
+	}
+
+	if !changed && encoded.Len() >= len(data) {
+		return SaveFile(bytes.NewReader(data), filename, allowed)
+	}
+
+	name, err := saveBytes(encoded.Bytes(), extension)
+	if err != nil {
+		return "", err
+	}
+
+	return "/rgg-sync/media/file/" + name, nil
+}
+
+func saveBytes(data []byte, extension string) (string, error) {
+	random := make([]byte, 12)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("failed to generate file name")
+	}
+
+	name := hex.EncodeToString(random) + extension
+	if err := putObject(name, data); err != nil {
+		return "", err
+	}
+	if objectStoreEnabled() {
+		return name, nil
+	}
+
+	directory := UploadDirectory()
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return "", fmt.Errorf("failed to create upload directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, name), data, 0o644); err != nil {
+		return "", fmt.Errorf("failed to save file")
+	}
+
+	return name, nil
+}
+
+// SaveFile stores an uploaded file under a random name and returns its public URL.
+func SaveFile(file io.Reader, filename string, allowedExtensions map[string]bool) (string, error) {
+	extension := strings.ToLower(filepath.Ext(filepath.Base(filename)))
+	if extension == "" || !allowedExtensions[extension] {
+		return "", fmt.Errorf("unsupported file type")
+	}
+
+	data, err := io.ReadAll(io.LimitReader(file, 30<<20))
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+
+	name, err := saveBytes(data, extension)
+	if err != nil {
+		return "", err
+	}
+
+	return "/rgg-sync/media/file/" + name, nil
+}
 
 func RegisterRoutes(srv Deps) {
 	srv.ServeEndpoint("/rgg-sync/media/upload", func(response http.ResponseWriter, request *http.Request) {
@@ -70,10 +178,7 @@ func RegisterRoutes(srv Deps) {
 			return
 		}
 
-		directory := os.Getenv("MEDIA_UPLOAD_DIR")
-		if directory == "" {
-			directory = "uploads"
-		}
+		directory := UploadDirectory()
 
 		if err := os.MkdirAll(directory, 0o755); err != nil {
 			writeJSON(response, http.StatusInternalServerError, map[string]string{"error": "не удалось создать хранилище"})
@@ -126,12 +231,23 @@ func RegisterRoutes(srv Deps) {
 			return
 		}
 
-		directory := os.Getenv("MEDIA_UPLOAD_DIR")
-		if directory == "" {
-			directory = "uploads"
+		if object, size, contentType, ok := openObject(name); ok {
+			defer func() {
+				_ = object.Close()
+			}()
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+			response.Header().Set("Content-Type", contentType)
+			if size > 0 {
+				response.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+			}
+			_, _ = io.Copy(response, object)
+
+			return
 		}
 
-		http.ServeFile(response, request, filepath.Join(directory, name))
+		http.ServeFile(response, request, filepath.Join(UploadDirectory(), name))
 	})
 
 	srv.ServeEndpoint("/rgg-sync/media/play", func(response http.ResponseWriter, request *http.Request) {

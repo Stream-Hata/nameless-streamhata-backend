@@ -65,11 +65,16 @@ func envAny(keys ...string) string {
 	return ""
 }
 
-var Env = map[string]string{
-	"TwitchBaseURL":      envAny("TWITCH_ID_URL", "TWITCH_BASE_URL"),
-	"TwitchClientKey":    envAny("TWITCH_CLIENT_KEY", "TWITCH_CLIENT_ID"),
-	"TwitchClientSecret": envAny("TWITCH_CLIENT_SECRET", "TWITCH_SECRET_KEY"),
-	"TwitchAppURL":       os.Getenv("TWITCH_APP_URL"),
+var Env = map[string]string{}
+
+// ReloadEnv обновляет настройки после загрузки секретов из credentials/OpenBao.
+func ReloadEnv() {
+	Env = map[string]string{
+		"TwitchBaseURL":      envAny("TWITCH_ID_URL", "TWITCH_BASE_URL"),
+		"TwitchClientKey":    envAny("TWITCH_CLIENT_KEY", "TWITCH_CLIENT_ID"),
+		"TwitchClientSecret": envAny("TWITCH_CLIENT_SECRET", "TWITCH_SECRET_KEY"),
+		"TwitchAppURL":       os.Getenv("TWITCH_APP_URL"),
+	}
 }
 
 func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.User], tokenRepo data_base.Database[data_base.Token]) {
@@ -103,6 +108,9 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 		params.Set("client_id", Env["TwitchClientKey"])
 		params.Set("redirect_uri", Env["TwitchAppURL"])
 		params.Set("response_type", "code")
+		if r.URL.Query().Get("force_verify") == "1" {
+			params.Set("force_verify", "true")
+		}
 		params.Set("scope", "moderator:read:followers "+
 			"moderator:read:chatters "+
 			"moderator:manage:chat_messages "+
@@ -144,6 +152,14 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 			http.SetCookie(w, &http.Cookie{
 				Name:     "e-hub-return",
 				Value:    returnTo,
+				Path:     "/",
+				Domain:   cookieDomain(),
+				SameSite: http.SameSiteLaxMode,
+			})
+		} else if host := r.Host; host == "streamhata.rdpctd.dev" || host == "ru.streamhata.rdpctd.dev" {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "e-hub-return",
+				Value:    "https://" + host + "/app/dashboard",
 				Path:     "/",
 				Domain:   cookieDomain(),
 				SameSite: http.SameSiteLaxMode,
@@ -227,7 +243,8 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 			Path:     "/",
 			Domain:   cookieDomain(),
 			SameSite: http.SameSiteLaxMode,
-			Expires:  time.Now().Add(time.Duration(tokenData.ExpiresIn) * time.Second),
+			MaxAge:   30 * 24 * 60 * 60,
+			Expires:  time.Now().Add(30 * 24 * time.Hour),
 			Secure:   os.Getenv("IS_PROD") == "1",
 			HttpOnly: true,
 		})
@@ -594,7 +611,9 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 		}
 
 		findToken.AccessToken = data.AccessToken
-		findToken.RefreshToken = data.RefreshToken
+		if data.RefreshToken != "" {
+			findToken.RefreshToken = data.RefreshToken
+		}
 		if _, err := tokenRepo.Update(*findToken); err == nil {
 			http.SetCookie(w, &http.Cookie{
 				Name:     "e-hub-refresh-token",
@@ -604,7 +623,8 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 				Secure:   os.Getenv("IS_PROD") == "1",
 				HttpOnly: true,
 				SameSite: http.SameSiteLaxMode,
-				Expires:  time.Now().Add(time.Duration(data.ExpiresIn) * time.Second),
+				MaxAge:   30 * 24 * 60 * 60,
+				Expires:  time.Now().Add(30 * 24 * time.Hour),
 			})
 		}
 
@@ -734,7 +754,7 @@ func validReturnURL(value string) bool {
 
 	host := parsed.Hostname()
 
-	return host == "streamhata.rdpctd.dev" || host == "streamhata-admin.rdpctd.dev"
+	return host == "streamhata.rdpctd.dev" || host == "ru.streamhata.rdpctd.dev" || host == "streamhata-admin.rdpctd.dev"
 }
 
 func cookieDomain() string {

@@ -1,0 +1,10 @@
+services:
+  statuspage:
+    build:
+      context: ..
+      dockerfile: statuspage/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - statuspage.env
+    ports:
+      - "8080:8080"

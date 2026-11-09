@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ru">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Админка статуса · StreamHata</title>
+	<link rel="icon" href="data:,">
+	<link rel="stylesheet" href="status.css">
+</head>
+<body>
+	<main class="page">
+		<header class="topbar">
+			<div>
+				<div class="eyebrow">StreamHata</div>
+				<h1>Админка статуса</h1>
+			</div>
+			<a class="admin-link" href="./">Назад к статусу</a>
+		</header>
+
+		<section class="card admin-card">
+			<label>Токен администратора
+				<input id="token" type="password" autocomplete="off" placeholder="X-Status-Token">
+			</label>
+			<button id="save-token" type="button">Сохранить токен</button>
+			<span id="token-state" class="muted"></span>
+		</section>
+
+		<section class="card admin-card">
+			<div class="section-head">
+				<h2>Инциденты</h2>
+				<button id="reload" type="button">Обновить</button>
+			</div>
+			<div id="incident-list" class="incidents"></div>
+		</section>
+
+		<section class="card admin-card">
+			<h2>Создать / изменить</h2>
+			<form id="incident-form" class="admin-form">
+				<label>Инцидент
+					<select id="incident-id">
+						<option value="">Новый инцидент</option>
+					</select>
+				</label>
+				<div class="admin-grid">
+					<label>Код <input id="code" placeholder="INC-001"></label>
+					<label>Кодовое имя <input id="codename" placeholder="BLACKOUT"></label>
+					<label>Критичность
+						<select id="severity">
+							<option value="minor">minor</option>
+							<option value="major">major</option>
+							<option value="critical">critical</option>
+						</select>
+					</label>
+					<label>Статус
+						<select id="status">
+							<option value="investigating">investigating</option>
+							<option value="identified">identified</option>
+							<option value="monitoring">monitoring</option>
+							<option value="resolved">resolved</option>
+						</select>
+					</label>
+				</div>
+				<label>Заголовок <input id="title" required></label>
+				<label>Описание <textarea id="description" rows="4"></textarea></label>
+				<label>Сообщение в хронологию <textarea id="message" rows="3" placeholder="Что изменилось"></textarea></label>
+				<div class="admin-actions">
+					<button id="create" type="button">Создать</button>
+					<button id="update" type="button">Обновить выбранный</button>
+				</div>
+				<p id="result" class="muted"></p>
+			</form>
+		</section>
+	</main>
+	<script src="admin.js"></script>
+</body>
+</html>

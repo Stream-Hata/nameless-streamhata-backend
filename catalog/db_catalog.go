@@ -8,6 +8,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/lib/pq"
 )
@@ -172,7 +173,7 @@ func (s *Service) List(filters Filters) ListResponse {
 	facets := Facets{Tiers: []FacetValue{}, Ages: []FacetValue{}, Platforms: []PlatformFacet{}}
 
 	if !filters.SkipFacets {
-		facets = s.facetsDB(where, args)
+		facets = s.facetsCached(where, args)
 	}
 
 	return ListResponse{
@@ -182,6 +183,33 @@ func (s *Service) List(filters Filters) ListResponse {
 		PageSize: pageSize,
 		Facets:   facets,
 	}
+}
+
+func (s *Service) facetsCached(where string, args []any) Facets {
+	key := where + fmt.Sprint(args)
+	now := time.Now()
+
+	s.facetsMu.Lock()
+	if entry, ok := s.facetsCache[key]; ok && now.Before(entry.expires) {
+		s.facetsMu.Unlock()
+		return entry.value
+	}
+	if s.facetsLoading[key] {
+		s.facetsMu.Unlock()
+		return Facets{Tiers: []FacetValue{}, Ages: []FacetValue{}, Platforms: []PlatformFacet{}}
+	}
+	s.facetsLoading[key] = true
+	s.facetsMu.Unlock()
+
+	go func() {
+		value := s.facetsDB(where, args)
+		s.facetsMu.Lock()
+		s.facetsCache[key] = facetsCacheEntry{value: value, expires: time.Now().Add(5 * time.Minute)}
+		delete(s.facetsLoading, key)
+		s.facetsMu.Unlock()
+	}()
+
+	return Facets{Tiers: []FacetValue{}, Ages: []FacetValue{}, Platforms: []PlatformFacet{}}
 }
 
 func (s *Service) facetsDB(where string, args []any) Facets {

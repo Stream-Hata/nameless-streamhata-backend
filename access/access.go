@@ -130,6 +130,10 @@ func (s *Service) IsOwner(login string) bool {
 	return s.Role(login) == "owner"
 }
 
+func (s *Service) IsAdmin(login string) bool {
+	return s.Role(login) == "owner" || s.Role(login) == "admin"
+}
+
 func (s *Service) load() {
 	if s.db == nil {
 		return

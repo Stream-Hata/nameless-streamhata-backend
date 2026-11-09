@@ -929,25 +929,40 @@ func (e *Enricher) translateRu(ctx context.Context, text string) string {
 		return ""
 	}
 
+	var result string
 	var segments [][]json.RawMessage
-	if json.Unmarshal(payload[0], &segments) != nil {
-		log.Printf("[translate] payload parse failed: %s", string(payload[0])[:min(200, len(payload[0]))])
-		return ""
+	if json.Unmarshal(payload[0], &segments) == nil {
+		var builder strings.Builder
+		for _, segment := range segments {
+			if len(segment) == 0 {
+				continue
+			}
+
+			var value string
+			if json.Unmarshal(segment[0], &value) == nil {
+				builder.WriteString(value)
+			}
+		}
+		result = strings.TrimSpace(builder.String())
+	} else {
+		var parts []string
+		if json.Unmarshal(payload[0], &parts) == nil && len(parts) > 0 {
+			result = strings.TrimSpace(parts[0])
+		} else {
+			var single string
+			if json.Unmarshal(payload[0], &single) == nil {
+				result = strings.TrimSpace(single)
+			}
+		}
 	}
 
-	var builder strings.Builder
-	for _, segment := range segments {
-		if len(segment) == 0 {
-			continue
+	if result == "" {
+		preview := string(payload[0])
+		if len(preview) > 200 {
+			preview = preview[:200]
 		}
-
-		var value string
-		if json.Unmarshal(segment[0], &value) == nil {
-			builder.WriteString(value)
-		}
+		log.Printf("[translate] payload parse failed: %s", preview)
 	}
-
-	result := strings.TrimSpace(builder.String())
 	log.Printf("[translate] result len=%d", len(result))
 	if result == "" {
 		log.Printf("[translate] empty result")

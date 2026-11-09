@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"strings"
@@ -46,6 +47,11 @@ type botCallback struct {
 }
 
 func (s *Service) BotLoop(ctx context.Context) {
+	s.mu.Lock()
+	token := strings.TrimSpace(s.config.TelegramToken)
+	s.mu.Unlock()
+	s.setAdminBotCommands(ctx, token)
+
 	var offset int64
 	for {
 		select {
@@ -67,6 +73,11 @@ func (s *Service) botUpdates(ctx context.Context, offset int64) ([]botUpdate, in
 	token := strings.TrimSpace(s.config.TelegramToken)
 	chat := strings.TrimSpace(s.config.TelegramChat)
 	s.mu.Unlock()
+
+	return s.botUpdatesFor(ctx, token, offset, chat)
+}
+
+func (s *Service) botUpdatesFor(ctx context.Context, token string, offset int64, chats ...string) ([]botUpdate, int64) {
 	if token == "" {
 		return nil, offset
 	}
@@ -94,7 +105,6 @@ func (s *Service) botUpdates(ctx context.Context, offset int64) ([]botUpdate, in
 			offset = update.UpdateID + 1
 		}
 	}
-	_ = chat
 	return payload.Result, offset
 }
 
@@ -117,9 +127,6 @@ func (s *Service) botHandle(ctx context.Context, update botUpdate) {
 	} else if update.Message != nil {
 		username = update.Message.From.Username
 	}
-	if !strings.EqualFold(username, owner) {
-		return
-	}
 
 	var chatID string
 	if update.CallbackQuery != nil && update.CallbackQuery.Message != nil {
@@ -128,6 +135,10 @@ func (s *Service) botHandle(ctx context.Context, update botUpdate) {
 		chatID = strconv.FormatInt(update.Message.Chat.ID, 10)
 	}
 	if chatID == "" {
+		return
+	}
+
+	if !strings.EqualFold(username, owner) {
 		return
 	}
 
@@ -168,11 +179,16 @@ func (s *Service) botHandle(ctx context.Context, update botUpdate) {
 	switch strings.ToLower(fields[0]) {
 	case "/issues":
 		page := 0
+		state := "open"
 		if len(fields) > 1 {
-			page, _ = strconv.Atoi(fields[1])
-			page--
+			if strings.EqualFold(fields[1], "closed") {
+				state = "closed"
+			} else {
+				page, _ = strconv.Atoi(fields[1])
+				page--
+			}
 		}
-		s.botIssues(ctx, token, configured, page)
+		s.botIssues(ctx, token, configured, page, state)
 	case "/issue":
 		if len(fields) > 1 {
 			key := strings.ToUpper(fields[1])
@@ -187,9 +203,15 @@ func (s *Service) botHandle(ctx context.Context, update botUpdate) {
 				return
 			}
 		}
-		s.botIssues(ctx, token, configured, 0)
+		s.botIssues(ctx, token, configured, 0, "open")
 	case "/feedbacks":
 		s.botFeedbacks(ctx, token, configured)
+	case "/logs":
+		s.botLogs(ctx, token, configured, fields[1:])
+	case "/metrics":
+		s.botMetrics(ctx, token, configured)
+	case "/grafana":
+		s.botSend(ctx, token, configured, "Grafana: https://grafana.streamhata.rdpctd.dev/d/streamhata-overview")
 	case "/close", "/open":
 		if len(fields) > 1 {
 			state := "closed"
@@ -199,11 +221,14 @@ func (s *Service) botHandle(ctx context.Context, update botUpdate) {
 			s.botSetState(ctx, token, configured, strings.ToUpper(fields[1]), state)
 		}
 	case "/help", "/start":
-		s.botSend(ctx, token, configured, "Feedback bot\n/issues — открытые issue\n/feedbacks — только фидбеки\n/issue BE-001 — детали\n/close BE-001, /open BE-001 — сменить статус")
+		s.botSend(ctx, token, configured, "Feedback bot\n/issues — issue (кнопка переключает закрытые)\n/feedbacks — фидбеки\n/issue BE-001 — детали и редактирование\n/logs 1h — логи из Loki\n/metrics — метрики Prometheus\n/grafana — дашборд\n/close BE-001, /open BE-001 — статус")
 	}
 }
 
-func (s *Service) botIssues(ctx context.Context, token, chat string, page int) {
+func (s *Service) botIssues(ctx context.Context, token, chat string, page int, state string) {
+	if state != "closed" {
+		state = "open"
+	}
 	s.mu.Lock()
 	repos := map[string]string{}
 	for key, value := range s.config.Repos {
@@ -217,7 +242,7 @@ func (s *Service) botIssues(ctx context.Context, token, chat string, page int) {
 	}
 	entries := make([]entry, 0)
 	for area, repo := range repos {
-		issues, err := s.githubList(ctx, repo)
+		issues, err := s.githubList(ctx, repo, state)
 		if err != nil {
 			continue
 		}
@@ -240,7 +265,11 @@ func (s *Service) botIssues(ctx context.Context, token, chat string, page int) {
 	}
 
 	var text strings.Builder
-	text.WriteString(fmt.Sprintf("Открытые issue · стр %d/%d\n", page+1, pages))
+	label := "Открытые issue"
+	if state == "closed" {
+		label = "Закрытые issue"
+	}
+	text.WriteString(fmt.Sprintf("%s · стр %d/%d\n", label, page+1, pages))
 	rows := make([][]map[string]string, 0, perPage+1)
 	start := page * perPage
 	end := start + perPage
@@ -261,14 +290,23 @@ func (s *Service) botIssues(ctx context.Context, token, chat string, page int) {
 	if pages > 1 {
 		row := make([]map[string]string, 0, 3)
 		if page > 0 {
-			row = append(row, map[string]string{"text": "‹", "callback_data": fmt.Sprintf("fb:page:%d", page)})
+			row = append(row, map[string]string{"text": "‹", "callback_data": fmt.Sprintf("fb:page:%s:%d", state, page)})
 		}
 		row = append(row, map[string]string{"text": fmt.Sprintf("%d/%d", page+1, pages), "callback_data": "fb:noop:0"})
 		if page+1 < pages {
-			row = append(row, map[string]string{"text": "›", "callback_data": fmt.Sprintf("fb:page:%d", page+2)})
+			row = append(row, map[string]string{"text": "›", "callback_data": fmt.Sprintf("fb:page:%s:%d", state, page+2)})
 		}
 		rows = append(rows, row)
 	}
+	toggleState := "closed"
+	toggleLabel := "Показать закрытые"
+	if state == "closed" {
+		toggleState = "open"
+		toggleLabel = "Показать открытые"
+	}
+	rows = append(rows, []map[string]string{{
+		"text": toggleLabel, "callback_data": "fb:state:" + toggleState,
+	}})
 	s.botSendKeyboard(ctx, token, chat, text.String(), map[string]any{"inline_keyboard": rows})
 }
 
@@ -329,8 +367,16 @@ func (s *Service) botCallback(ctx context.Context, query *botCallback, token, ch
 	}
 	switch parts[1] {
 	case "page":
-		page, _ := strconv.Atoi(parts[2])
-		s.botIssues(ctx, token, chat, page-1)
+		state := "open"
+		pageIndex := 2
+		if len(parts) == 4 {
+			state = parts[2]
+			pageIndex = 3
+		}
+		page, _ := strconv.Atoi(parts[pageIndex])
+		s.botIssues(ctx, token, chat, page-1, state)
+	case "state":
+		s.botIssues(ctx, token, chat, 0, parts[2])
 	case "view":
 		if len(parts) == 4 {
 			number, _ := strconv.Atoi(parts[3])
@@ -406,6 +452,11 @@ func (s *Service) botIssueDetail(ctx context.Context, token, chat, prefix string
 			{"text": "Описание", "callback_data": "fb:edit:body:" + key},
 		},
 		{
+			{"text": "Метки", "callback_data": "fb:edit:labels:" + key},
+			{"text": "Исполнитель", "callback_data": "fb:edit:assignee:" + key},
+			{"text": "Milestone", "callback_data": "fb:edit:milestone:" + key},
+		},
+		{
 			{"text": "Добавить комментарий", "callback_data": "fb:comment:" + key},
 		},
 	}}
@@ -435,9 +486,9 @@ func (s *Service) botSetState(ctx context.Context, token, chat, key, state strin
 
 func (s *Service) botBeginEdit(ctx context.Context, token, chat, prefix string, number int, kind string) {
 	botPending.Store(chat, botPendingEdit{area: strings.ToUpper(prefix), number: number, kind: kind})
-	label := "заголовок"
-	if kind == "body" {
-		label = "описание"
+	label := map[string]string{"title": "заголовок", "body": "описание", "labels": "метки через запятую", "assignee": "логин исполнителя", "milestone": "название или номер milestone"}[kind]
+	if label == "" {
+		label = kind
 	}
 	s.botSend(ctx, token, chat, "Отправь новый "+label+" для "+strings.ToUpper(prefix)+"-"+strconv.Itoa(number))
 }
@@ -462,6 +513,41 @@ func (s *Service) botApplyEdit(ctx context.Context, token, chat string, edit bot
 			return
 		}
 		s.botSend(ctx, token, chat, "Комментарий добавлен")
+		return
+	}
+	if edit.kind == "labels" {
+		labels := make([]string, 0)
+		for _, label := range strings.Split(text, ",") {
+			if label = strings.TrimSpace(label); label != "" {
+				labels = append(labels, label)
+			}
+		}
+		if err := s.githubUpdateFields(ctx, repo, edit.number, map[string]any{"labels": labels}); err != nil {
+			s.botSend(ctx, token, chat, "Не удалось обновить метки: "+err.Error())
+			return
+		}
+		s.botSend(ctx, token, chat, "Метки обновлены")
+		return
+	}
+	if edit.kind == "assignee" {
+		if err := s.githubUpdateFields(ctx, repo, edit.number, map[string]any{"assignees": []string{strings.TrimSpace(text)}}); err != nil {
+			s.botSend(ctx, token, chat, "Не удалось назначить исполнителя: "+err.Error())
+			return
+		}
+		s.botSend(ctx, token, chat, "Исполнитель обновлён")
+		return
+	}
+	if edit.kind == "milestone" {
+		number, err := s.githubMilestoneNumber(ctx, repo, text)
+		if err != nil {
+			s.botSend(ctx, token, chat, "Milestone не найден: "+err.Error())
+			return
+		}
+		if err := s.githubUpdateFields(ctx, repo, edit.number, map[string]any{"milestone": number}); err != nil {
+			s.botSend(ctx, token, chat, "Не удалось обновить milestone: "+err.Error())
+			return
+		}
+		s.botSend(ctx, token, chat, "Milestone обновлён")
 		return
 	}
 	if err := s.githubUpdateIssue(ctx, repo, edit.number, edit.kind, text); err != nil {
@@ -517,6 +603,109 @@ func (s *Service) botSendKeyboard(ctx context.Context, token, chat, text string,
 func (s *Service) botAnswer(ctx context.Context, token, id, text string) {
 	body, _ := json.Marshal(map[string]string{"callback_query_id": id, "text": text})
 	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.telegram.org/bot"+token+"/answerCallbackQuery", strings.NewReader(string(body)))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.http.Do(request)
+	if err == nil {
+		response.Body.Close()
+	}
+}
+
+func (s *Service) botLogs(ctx context.Context, token, chat string, args []string) {
+	period := "1h"
+	if len(args) > 0 {
+		period = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	if _, ok := diagnosticsPeriods[period]; !ok {
+		s.botSend(ctx, token, chat, "Период: 15m, 1h, 6h или 24h")
+		return
+	}
+	sources := []string{"backend", "nginx", "database", "postgres", "openbao"}
+	if len(args) > 1 {
+		source := strings.ToLower(strings.TrimSpace(args[1]))
+		if !diagnosticsSourceAllowed(source) || source == "metrics" {
+			s.botSend(ctx, token, chat, "Источник: backend, nginx, database, postgres или openbao")
+			return
+		}
+		sources = []string{source}
+	}
+	content := s.collectDiagnostics(ctx, DiagnosticsRequest{Enabled: true, Period: period, Sources: sources}, "")
+	s.botSendLogs(ctx, token, chat, "Логи за "+period, content)
+}
+
+func (s *Service) botMetrics(ctx context.Context, token, chat string) {
+	content := s.collectDiagnostics(ctx, DiagnosticsRequest{Enabled: true, Period: "1h", Sources: []string{"metrics"}}, "")
+	s.botSendLogs(ctx, token, chat, "Метрики Prometheus", content)
+}
+
+func (s *Service) botSendLogs(ctx context.Context, token, chat, title, content string) {
+	s.botSend(ctx, token, chat, title)
+	if strings.TrimSpace(content) == "" {
+		s.botSend(ctx, token, chat, "Нет данных.")
+		return
+	}
+	runes := []rune(content)
+	for len(runes) > 0 {
+		end := 3500
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunk := string(runes[:end])
+		runes = runes[end:]
+		s.botSendHTML(ctx, token, chat, "<pre>"+html.EscapeString(chunk)+"</pre>")
+	}
+}
+
+func (s *Service) botSendHTML(ctx context.Context, token, chat, text string) {
+	payload := map[string]any{
+		"chat_id":                  chat,
+		"text":                     text,
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": true,
+	}
+	body, _ := json.Marshal(payload)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.telegram.org/bot"+token+"/sendMessage", strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := s.http.Do(request)
+	if err == nil {
+		response.Body.Close()
+	}
+}
+
+func (s *Service) setAdminBotCommands(ctx context.Context, token string) {
+	s.setBotCommands(ctx, token, []map[string]string{
+		{"command": "issues", "description": "Открытые и закрытые issue"},
+		{"command": "issue", "description": "Детали и редактирование issue"},
+		{"command": "feedbacks", "description": "Последние фидбеки"},
+		{"command": "logs", "description": "Логи Loki: /logs 1h [source]"},
+		{"command": "metrics", "description": "Метрики Prometheus"},
+		{"command": "grafana", "description": "Ссылка на Grafana"},
+		{"command": "close", "description": "Закрыть issue: /close FE-001"},
+		{"command": "open", "description": "Открыть issue: /open FE-001"},
+		{"command": "help", "description": "Справка"},
+	})
+}
+
+func (s *Service) setUserBotCommands(ctx context.Context, token string) {
+	s.setBotCommands(ctx, token, []map[string]string{
+		{"command": "my", "description": "Мои обращения"},
+		{"command": "status", "description": "Статус обращения: /status FE-001"},
+		{"command": "stop", "description": "Отключить уведомления"},
+		{"command": "help", "description": "Справка"},
+	})
+}
+
+func (s *Service) setBotCommands(ctx context.Context, token string, commands []map[string]string) {
+	if strings.TrimSpace(token) == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]any{"commands": commands})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.telegram.org/bot"+token+"/setMyCommands", strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := s.http.Do(request)
 	if err == nil {

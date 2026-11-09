@@ -1,0 +1,9 @@
+[Unit]
+Description=StreamHata DNS failover
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/streamhata-dns-failover.py
+Nice=10

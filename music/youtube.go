@@ -48,7 +48,7 @@ func ExtractVideoID(text string) (string, bool) {
 	return match[1], true
 }
 
-var mediaPattern = regexp.MustCompile(`https?://[^\s<>"']+\.(?:mp3|m4a|aac|ogg|wav|flac|mp4|webm|mov|mkv)(?:\?[^\s<>"']*)?`)
+var mediaPattern = regexp.MustCompile(`(?i)https?://[^\s<>"']+\.(?:mp3|m4a|aac|ogg|wav|flac|mp4|webm|mov|mkv)(?:\?[^\s<>"']*)?`)
 
 func ExtractLink(text string) (string, string, bool) {
 	if videoID, ok := ExtractVideoID(text); ok {

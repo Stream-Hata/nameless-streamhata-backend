@@ -158,16 +158,27 @@ type Service struct {
 	enricher     *Enricher
 	enrichCursor atomic.Uint64
 	importing    atomic.Bool
+
+	facetsMu      sync.Mutex
+	facetsCache   map[string]facetsCacheEntry
+	facetsLoading map[string]bool
+}
+
+type facetsCacheEntry struct {
+	value   Facets
+	expires time.Time
 }
 
 func New(db *sql.DB) *Service {
 	service := &Service{
-		bySlug:    make(map[string]int),
-		db:        db,
-		client:    &http.Client{Timeout: 90 * time.Second},
-		sourceURL: sourceURL(),
-		rggTitles: make(map[string]bool),
-		enricher:  newEnricher(db),
+		bySlug:        make(map[string]int),
+		db:            db,
+		client:        &http.Client{Timeout: 90 * time.Second},
+		sourceURL:     sourceURL(),
+		rggTitles:     make(map[string]bool),
+		enricher:      newEnricher(db),
+		facetsCache:   make(map[string]facetsCacheEntry),
+		facetsLoading: make(map[string]bool),
 	}
 
 	initRAWGQuota(db)

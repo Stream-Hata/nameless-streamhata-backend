@@ -179,9 +179,15 @@ func (s *Service) RegisterRoutes(srv Deps) {
 		}
 
 		log.Printf("[translate] detail %s desc=%d ru=%d", game.Slug, len(game.Description), len(game.DescriptionRu))
-		if game.DescriptionRu == "" && game.Description != "" && !containsCyrillic(game.Description) {
-			game.DescriptionRu = s.enricher.translateRu(request.Context(), game.Description)
-			log.Printf("[translate] assigned len=%d", len(game.DescriptionRu))
+		if game.DescriptionRu == "" && game.Description != "" {
+			if containsCyrillic(game.Description) {
+				game.DescriptionRu = game.Description
+				s.SaveDescriptionRu(game.Slug, game.DescriptionRu)
+			} else {
+				game.DescriptionRu = s.enricher.translateRu(request.Context(), game.Description)
+				log.Printf("[translate] assigned len=%d", len(game.DescriptionRu))
+				s.SaveDescriptionRu(game.Slug, game.DescriptionRu)
+			}
 		}
 
 		writeJSON(response, http.StatusOK, game)
@@ -457,7 +463,7 @@ func parseFilters(request *http.Request) Filters {
 		Sort:       query.Get("sort"),
 		Order:      query.Get("order"),
 		SkipFacets: query.Get("facets") == "0" || query.Get("facets") == "false",
-		SkipEnrich: query.Get("enrich") == "0" || query.Get("enrich") == "false",
+		SkipEnrich: query.Get("enrich") != "1",
 	}
 }
 

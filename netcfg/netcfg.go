@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 )
@@ -68,6 +69,10 @@ func (p *Provider) Update(settings Settings) (Settings, error) {
 
 // proxyFunc — динамический выбор прокси для каждого запроса.
 func (p *Provider) proxyFunc(request *http.Request) (*url.URL, error) {
+	if os.Getenv("NETCFG_DISABLE_PROXY") == "1" {
+		return nil, nil
+	}
+
 	settings := p.Get()
 
 	if !settings.Enabled || settings.ProxyURL == "" {

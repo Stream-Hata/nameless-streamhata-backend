@@ -22,6 +22,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/alerts"
 	"github.com/p7x-dev/nameless-streamhata-backend/analytics"
 	"github.com/p7x-dev/nameless-streamhata-backend/appdownload"
+	"github.com/p7x-dev/nameless-streamhata-backend/blog"
 	"github.com/p7x-dev/nameless-streamhata-backend/catalog"
 	"github.com/p7x-dev/nameless-streamhata-backend/chat"
 	"github.com/p7x-dev/nameless-streamhata-backend/chatjury"
@@ -39,6 +40,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/llm"
 	"github.com/p7x-dev/nameless-streamhata-backend/lots"
 	"github.com/p7x-dev/nameless-streamhata-backend/media"
+	"github.com/p7x-dev/nameless-streamhata-backend/messaging"
 	"github.com/p7x-dev/nameless-streamhata-backend/metrics"
 	"github.com/p7x-dev/nameless-streamhata-backend/moderation"
 	"github.com/p7x-dev/nameless-streamhata-backend/music"
@@ -53,6 +55,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/roulette"
 	"github.com/p7x-dev/nameless-streamhata-backend/server"
 	"github.com/p7x-dev/nameless-streamhata-backend/seventv"
+	"github.com/p7x-dev/nameless-streamhata-backend/statuspage"
 	"github.com/p7x-dev/nameless-streamhata-backend/steam"
 	"github.com/p7x-dev/nameless-streamhata-backend/stream"
 	"github.com/p7x-dev/nameless-streamhata-backend/suggestions"
@@ -69,6 +72,18 @@ import (
 // webhookProviders — сервисы, которые шлют донаты вебхуками на наш URL.
 var webhookProviders = []string{"donationto", "donatestream", "donatepay", "generic"}
 
+func telegramPollingActive() bool {
+	if os.Getenv("TELEGRAM_BOT_DISABLED") == "1" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NODE_ACTIVE"))) {
+	case "0", "false", "no", "standby":
+		return false
+	default:
+		return true
+	}
+}
+
 func main() {
 	if err := credentials.Load(); err != nil {
 		log.Printf("[credentials] load failed: %v", err)
@@ -84,6 +99,8 @@ func main() {
 		log.Printf("[config] .env not found, using process environment")
 	}
 
+	twitch.ReloadEnv()
+
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -92,6 +109,10 @@ func main() {
 	defer cancel()
 
 	srv := server.NewServer(ctx)
+	srv.ServeEndpoint("/live", func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = response.Write([]byte("ok\n"))
+	})
 	appdownload.RegisterRoutes(srv)
 	go func() {
 		if err := srv.Listen(); err != nil {
@@ -161,8 +182,10 @@ func main() {
 		_, _ = response.Write([]byte(`{"ok":true}`))
 	})
 
-	feedbackService := feedback.New(musicDB)
+	feedbackService := feedback.New(musicDB, useRepo, tokenRepo)
 	feedbackService.RegisterRoutes(srv)
+
+	statuspage.RegisterRoutes(srv, statuspage.New(musicDB))
 
 	eventsService := events.New(musicDB)
 	lots.RegisterRoutes(srv)
@@ -172,6 +195,7 @@ func main() {
 	widgets.RegisterRoutes(srv, widgetsService)
 
 	catalogService := catalog.New(musicDB)
+	catalogService.StartTranslationWorker(context.Background())
 	catalogService.RegisterRoutes(srv)
 
 	rouletteService := roulette.New(musicDB, catalogService)
@@ -180,8 +204,14 @@ func main() {
 	accessService := access.New(musicDB)
 	access.RegisterRoutes(srv, accessService)
 
+	blogService := blog.New(musicDB, accessService)
+	blogService.RegisterRoutes(srv)
+
 	suggestionsService := suggestions.New(musicDB, accessService)
 	suggestionsService.RegisterRoutes(srv)
+
+	messagingService := messaging.New(musicDB)
+	messagingService.RegisterRoutes(srv)
 
 	desktopAuthService := desktopauth.New(musicDB)
 	desktopAuthService.RegisterRoutes(srv)
@@ -218,6 +248,9 @@ func main() {
 
 	syncService := syncstate.New()
 	syncstate.RegisterRoutes(srv, syncService)
+	if err := media.InitObjectStore(); err != nil {
+		log.Printf("[media] object storage unavailable, using local disk: %v", err)
+	}
 	media.RegisterRoutes(srv)
 
 	alertsService := alerts.New()
@@ -228,10 +261,16 @@ func main() {
 	go sevenTVService.Run(ctx)
 
 	notifyService := notify.New(musicDB)
-	if token := feedbackService.TelegramToken(); token != "" && token != notifyService.GetSettings().TelegramToken {
-		go feedbackService.BotLoop(ctx)
-	} else if token != "" {
-		log.Printf("[Feedback] bot token совпадает с основным Telegram-ботом; отдельный loop не запущен")
+	if telegramPollingActive() {
+		if token := feedbackService.TelegramToken(); token != "" && token != notifyService.GetSettings().TelegramToken {
+			go feedbackService.BotLoop(ctx)
+		} else if token != "" {
+			log.Printf("[Feedback] bot token совпадает с основным Telegram-ботом; отдельный loop не запущен")
+		}
+		go feedbackService.UserBotLoop(ctx)
+		go feedbackService.IssueWatcher(ctx)
+	} else {
+		log.Printf("[Telegram] polling disabled on standby node")
 	}
 	notify.RegisterRoutes(srv, notifyService)
 	musicService.SetTelegramSender(notifyService.SendTelegramText)
@@ -250,6 +289,51 @@ func main() {
 		viewerRuntime,
 		alertsService,
 	)
+
+	srv.ServeEndpoint("/rgg-sync/chat/send", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+		cookie, err := request.Cookie("e-hub-refresh-token")
+		if err != nil || strings.TrimSpace(cookie.Value) == "" {
+			http.Error(response, "unauthorized", http.StatusUnauthorized)
+
+			return
+		}
+		if _, err := tokenRepo.Find(data_base.Where{Column: "refresh_token", Value: cookie.Value}); err != nil {
+			http.Error(response, "unauthorized", http.StatusUnauthorized)
+
+			return
+		}
+		var body struct {
+			Text    string `json:"text"`
+			Channel string `json:"channel"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(response, request.Body, 16<<10)).Decode(&body); err != nil {
+			http.Error(response, "invalid json", http.StatusBadRequest)
+
+			return
+		}
+		text := strings.TrimSpace(body.Text)
+		if text == "" || len([]rune(text)) > 500 {
+			http.Error(response, "message must be 1-500 characters", http.StatusBadRequest)
+
+			return
+		}
+		channel := strings.TrimSpace(body.Channel)
+		if channel == "" {
+			channel = chatRuntime.CurrentChannelLogin()
+		}
+		if err := chatRuntime.SayTo(request.Context(), channel, text); err != nil {
+			http.Error(response, err.Error(), http.StatusBadGateway)
+
+			return
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(response).Encode(map[string]bool{"ok": true})
+	})
 
 	welcomeService := welcome.New(musicDB, chatRuntime)
 	welcome.RegisterRoutes(srv, welcomeService)
@@ -553,19 +637,21 @@ func main() {
 		log.Printf("[Chat] runtime start failed: %v", err)
 	}
 
-	go notifyService.TelegramBotLoop(ctx, func() string {
-		viewers, _ := chatRuntime.GetStreamViewers(ctx)
-		started, _ := chatRuntime.StreamStartedAt(ctx)
-		if started == "" {
-			return "Стрим не в эфире"
-		}
+	if telegramPollingActive() {
+		go notifyService.TelegramBotLoop(ctx, func() string {
+			viewers, _ := chatRuntime.GetStreamViewers(ctx)
+			started, _ := chatRuntime.StreamStartedAt(ctx)
+			if started == "" {
+				return "Стрим не в эфире"
+			}
 
-		return fmt.Sprintf("В эфире, зрителей: %d, с %s", viewers, started)
-	}, func(page int) (string, int) {
-		return musicService.TelegramPage(page, 10)
-	}, func() string {
-		return chatRuntime.ChannelLogin()
-	})
+			return fmt.Sprintf("В эфире, зрителей: %d, с %s", viewers, started)
+		}, func(page int) (string, int) {
+			return musicService.TelegramPage(page, 10)
+		}, func() string {
+			return chatRuntime.ChannelLogin()
+		})
+	}
 
 	// Конвейер чата: активность таймеров, команды, модерация, баллы, игры.
 	chatService.Subscribe(func(message twitch.TwitchChatMessage) {
