@@ -107,6 +107,11 @@ func (s *Service) createGameDiscussion(response http.ResponseWriter, request *ht
 	if len([]rune(message)) > 4000 {
 		message = string([]rune(message)[:4000])
 	}
+	if decision := s.spam.CheckDiscussion(userID, message); !decision.Allowed {
+		writeSpam(response, decision)
+
+		return
+	}
 
 	if body.ParentID != nil {
 		var parentAuthor int64

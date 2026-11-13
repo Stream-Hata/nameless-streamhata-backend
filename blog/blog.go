@@ -2,11 +2,14 @@
 package blog
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -18,6 +21,7 @@ import (
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/p7x-dev/nameless-streamhata-backend/access"
 	"github.com/p7x-dev/nameless-streamhata-backend/media"
+	"github.com/p7x-dev/nameless-streamhata-backend/security"
 )
 
 type Deps interface {
@@ -41,18 +45,19 @@ type Article struct {
 }
 
 type Service struct {
-	db     *sql.DB
-	access *access.Service
-	policy *bluemonday.Policy
+	db       *sql.DB
+	access   *access.Service
+	policy   *bluemonday.Policy
+	security *security.Service
 }
 
-func New(db *sql.DB, accessService *access.Service) *Service {
+func New(db *sql.DB, accessService *access.Service, securityService *security.Service) *Service {
 	policy := bluemonday.UGCPolicy()
 	policy.AllowStyling()
 	policy.AllowAttrs("class").Globally()
 	policy.RequireNoFollowOnLinks(true)
 
-	return &Service{db: db, access: accessService, policy: policy}
+	return &Service{db: db, access: accessService, policy: policy, security: securityService}
 }
 
 func (s *Service) RegisterRoutes(srv Deps) {
@@ -90,7 +95,42 @@ func (s *Service) upload(response http.ResponseWriter, request *http.Request) {
 		_ = file.Close()
 	}()
 
-	url, err := media.SaveImage(file, header.Filename, 2400, map[string]bool{
+	data, err := io.ReadAll(io.LimitReader(file, 15<<20))
+	if err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "failed to read file"})
+
+		return
+	}
+
+	var scanReport *security.ScanReport
+	if s.security != nil {
+		if scanner := s.security.FileScanner(); scanner != nil && scanner.Enabled() {
+			report, scanErr := scanner.Scan(request.Context(), data, security.ScanMeta{
+				FileName: header.Filename,
+				Mime:     header.Header.Get("Content-Type"),
+			})
+			if errors.Is(scanErr, security.ErrScanUnavailable) {
+				writeJSON(response, http.StatusServiceUnavailable, map[string]any{"error": "security scan is unavailable", "scan": report})
+
+				return
+			}
+			if scanErr != nil && !errors.Is(scanErr, security.ErrScannerDisabled) {
+				writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "security scan failed"})
+
+				return
+			}
+			if scanErr == nil {
+				scanReport = &report
+				if report.Verdict == security.ScanBlocked {
+					writeJSON(response, http.StatusUnprocessableEntity, map[string]any{"error": "file blocked by security scan", "scan": report})
+
+					return
+				}
+			}
+		}
+	}
+
+	url, err := media.SaveImage(bytes.NewReader(data), header.Filename, 2400, map[string]bool{
 		".avif": true, ".bmp": true, ".gif": true, ".jpeg": true, ".jpg": true, ".png": true, ".webp": true,
 	})
 	if err != nil {
@@ -99,7 +139,11 @@ func (s *Service) upload(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	writeJSON(response, http.StatusCreated, map[string]string{"url": url})
+	payload := map[string]any{"url": url}
+	if scanReport != nil {
+		payload["scan"] = scanReport
+	}
+	writeJSON(response, http.StatusCreated, payload)
 }
 
 func (s *Service) publicList(response http.ResponseWriter, request *http.Request) {

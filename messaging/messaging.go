@@ -1,34 +1,74 @@
 package messaging
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha512"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/lib/pq"
 	"github.com/p7x-dev/nameless-streamhata-backend/media"
+	"github.com/p7x-dev/nameless-streamhata-backend/mods"
+	"github.com/p7x-dev/nameless-streamhata-backend/security"
+	"github.com/p7x-dev/nameless-streamhata-backend/spamguard"
 )
 
 type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-type Service struct {
-	db *sql.DB
+type ModVerifier interface {
+	Verify(ctx context.Context, sha512 string, fingerprints []uint32) (mods.Result, error)
 }
 
-func New(db *sql.DB) *Service { return &Service{db: db} }
+type Service struct {
+	db       *sql.DB
+	security *security.Service
+	mods     ModVerifier
+	spam     *spamguard.Guard
+}
+
+func New(db *sql.DB, securityService *security.Service, modsService ModVerifier) *Service {
+	return &Service{
+		db:       db,
+		security: securityService,
+		mods:     modsService,
+		spam:     spamguard.NewFromEnv(),
+	}
+}
+
+var ErrModTampered = errors.New("mod does not match official source")
+
+func verifyMod(ctx context.Context, verifier ModVerifier, filename string, data []byte) (*mods.Result, error) {
+	if verifier == nil || !strings.EqualFold(filepath.Ext(filename), ".jar") {
+		return nil, nil
+	}
+	sum := sha512.Sum512(data)
+	result, err := verifier.Verify(ctx, hex.EncodeToString(sum[:]), mods.Fingerprints(data))
+	if err != nil {
+		return nil, err
+	}
+	if result.Verdict == mods.VerdictTampered {
+		return &result, ErrModTampered
+	}
+	return &result, nil
+}
 
 func (s *Service) RegisterRoutes(srv Deps) {
 	srv.ServeEndpoint("/rgg-sync/messaging/identity", s.identity)
 	srv.ServeEndpoint("/rgg-sync/messaging/upload", s.upload)
+	srv.ServeEndpoint("/rgg-sync/messaging/security-notices", s.securityNotices)
 	srv.ServeEndpoint("/rgg-sync/messaging/contacts", s.contacts)
 	srv.ServeEndpoint("/rgg-sync/messaging/messages", s.messages)
 	srv.ServeEndpoint("/rgg-sync/messaging/unread", s.unread)
@@ -127,13 +167,19 @@ func (s *Service) identity(response http.ResponseWriter, request *http.Request) 
 }
 
 func (s *Service) upload(response http.ResponseWriter, request *http.Request) {
-	if _, _, _, ok := s.user(request); !ok {
+	userID, login, _, ok := s.user(request)
+	if !ok {
 		writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "twitch authorization required"})
 
 		return
 	}
 	if request.Method != http.MethodPost {
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+		return
+	}
+	if decision := s.spam.CheckUpload(userID); !decision.Allowed {
+		writeSpam(response, decision)
 
 		return
 	}
@@ -155,18 +201,219 @@ func (s *Service) upload(response http.ResponseWriter, request *http.Request) {
 		_ = file.Close()
 	}()
 
-	url, err := media.SaveImage(file, header.Filename, 2000, map[string]bool{
+	data, err := io.ReadAll(io.LimitReader(file, 25<<20))
+	if err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "failed to read file"})
+
+		return
+	}
+
+	var scanReport *security.ScanReport
+	if s.security != nil {
+		if scanner := s.security.FileScanner(); scanner != nil && scanner.Enabled() {
+			report, scanErr := scanner.Scan(request.Context(), data, security.ScanMeta{
+				FileName: header.Filename,
+				Mime:     header.Header.Get("Content-Type"),
+			})
+			if errors.Is(scanErr, security.ErrScanUnavailable) {
+				writeJSON(response, http.StatusServiceUnavailable, map[string]any{
+					"error": "security scan is unavailable",
+					"scan":  report,
+				})
+
+				return
+			}
+			if scanErr != nil && !errors.Is(scanErr, security.ErrScannerDisabled) {
+				writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "security scan failed"})
+
+				return
+			}
+			if scanErr == nil {
+				scanReport = &report
+				if report.Verdict == security.ScanBlocked {
+					reportJSON, _ := json.Marshal(report)
+					chatType := strings.TrimSpace(request.FormValue("chatType"))
+					if chatType == "" {
+						chatType = "upload"
+					}
+					recipientID, _ := strconv.ParseInt(request.FormValue("recipientId"), 10, 64)
+					if s.security != nil {
+						incident, incidentErr := s.security.CreateIncident(request.Context(), security.CreateInput{
+							Kind:        "file",
+							Verdict:     report.Verdict,
+							Severity:    report.Severity,
+							ChatType:    chatType,
+							ChatID:      request.FormValue("chatId"),
+							SenderID:    userID,
+							SenderLogin: login,
+							RecipientID: recipientID,
+							FileName:    header.Filename,
+							FileHash:    report.SHA256,
+							Reason:      report.Reason,
+							Report:      json.RawMessage(reportJSON),
+						}, "upload-gate")
+						if incidentErr != nil {
+							fmt.Printf("[security] failed to create upload incident: %v\n", incidentErr)
+						} else {
+							if quarantineErr := s.security.Quarantine(request.Context(), incident.ID, data, report.SHA256); quarantineErr != nil {
+								fmt.Printf("[security] failed to quarantine upload: %v\n", quarantineErr)
+							}
+							if chatType == "dm" {
+								s.createSecurityNotice(request.Context(), incident.ID, userID, request.FormValue("chatId"))
+							}
+						}
+					}
+					writeJSON(response, http.StatusUnprocessableEntity, map[string]any{
+						"error": "file blocked by security scan",
+						"scan":  report,
+					})
+
+					return
+				}
+			}
+		}
+	}
+
+	modReport, modErr := verifyMod(request.Context(), s.mods, header.Filename, data)
+	if errors.Is(modErr, ErrModTampered) {
+		if s.security != nil && modReport != nil {
+			sum := sha512.Sum512(data)
+			hash := hex.EncodeToString(sum[:])
+			reportJSON, _ := json.Marshal(modReport)
+			incident, incidentErr := s.security.CreateIncident(request.Context(), security.CreateInput{
+				Kind:        "mod",
+				Verdict:     "tampered",
+				Severity:    "critical",
+				ChatType:    "dm",
+				ChatID:      request.FormValue("chatId"),
+				SenderID:    userID,
+				SenderLogin: login,
+				FileName:    header.Filename,
+				FileHash:    hash,
+				Reason:      modReport.Reason,
+				Report:      json.RawMessage(reportJSON),
+			}, "mod-verification")
+			if incidentErr == nil {
+				_ = s.security.Quarantine(request.Context(), incident.ID, data, hash)
+			}
+		}
+		writeJSON(response, http.StatusUnprocessableEntity, map[string]any{
+			"error": "mod does not match official source",
+			"mod":   modReport,
+		})
+
+		return
+	}
+	if modErr != nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "mod verification unavailable"})
+
+		return
+	}
+
+	allowed := map[string]bool{
 		".avif": true, ".bmp": true, ".gif": true, ".jpeg": true, ".jpg": true, ".png": true, ".webp": true,
 		".mp3": true, ".ogg": true, ".wav": true, ".m4a": true, ".aac": true, ".flac": true, ".opus": true,
-		".mp4": true, ".webm": true, ".mov": true, ".mkv": true, ".pdf": true, ".txt": true, ".zip": true,
-	})
+		".mp4": true, ".webm": true, ".mov": true, ".mkv": true, ".pdf": true, ".txt": true, ".zip": true, ".jar": true,
+	}
+	var url string
+	if request.FormValue("asDocument") == "1" {
+		url, err = media.SaveFile(bytes.NewReader(data), header.Filename, allowed)
+	} else {
+		url, err = media.SaveImage(bytes.NewReader(data), header.Filename, 2000, allowed)
+	}
 	if err != nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"error": err.Error()})
 
 		return
 	}
 
-	writeJSON(response, http.StatusCreated, map[string]string{"url": url})
+	payload := map[string]any{"url": url}
+	if scanReport != nil {
+		payload["scan"] = scanReport
+	}
+	if modReport != nil {
+		payload["mod"] = modReport
+	}
+	writeJSON(response, http.StatusCreated, payload)
+}
+
+type SecurityNotice struct {
+	ID         int64           `json:"id"`
+	IncidentID int64           `json:"incidentId"`
+	Sender     string          `json:"sender"`
+	Recipient  string          `json:"recipient"`
+	Kind       string          `json:"kind"`
+	Verdict    string          `json:"verdict"`
+	Severity   string          `json:"severity"`
+	FileName   string          `json:"fileName"`
+	FileHash   string          `json:"fileHash"`
+	Reason     string          `json:"reason"`
+	Report     json.RawMessage `json:"report"`
+	CreatedAt  time.Time       `json:"createdAt"`
+}
+
+func (s *Service) createSecurityNotice(ctx context.Context, incidentID, senderID int64, recipientLogin string) {
+	recipientLogin = strings.TrimSpace(recipientLogin)
+	if recipientLogin == "" || senderID == 0 {
+		return
+	}
+	var recipientID int64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM users WHERE lower(username) = lower($1) LIMIT 1`, recipientLogin).Scan(&recipientID); err != nil {
+		return
+	}
+	_, _ = s.db.ExecContext(ctx, `INSERT INTO security_notices (incident_id, sender_id, recipient_id) VALUES ($1,$2,$3) ON CONFLICT (incident_id) DO NOTHING`, incidentID, senderID, recipientID)
+}
+
+func (s *Service) securityNotices(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	userID, _, _, ok := s.user(request)
+	if !ok {
+		writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "twitch authorization required"})
+		return
+	}
+	peerLogin := strings.TrimSpace(request.URL.Query().Get("with"))
+	if peerLogin == "" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "peer is required"})
+		return
+	}
+	var peerID int64
+	if err := s.db.QueryRowContext(request.Context(), `SELECT id FROM users WHERE lower(username) = lower($1) LIMIT 1`, peerLogin).Scan(&peerID); err != nil {
+		writeJSON(response, http.StatusOK, map[string]any{"items": []SecurityNotice{}})
+		return
+	}
+	rows, err := s.db.QueryContext(request.Context(), `
+		SELECT n.id, n.incident_id, COALESCE(sender.username,''), recipient.username,
+			i.kind, i.verdict, i.severity, i.file_name, i.file_hash, i.reason, i.report, i.created_at
+		FROM security_notices n
+		JOIN security_incidents i ON i.id = n.incident_id
+		LEFT JOIN users sender ON sender.id = n.sender_id
+		JOIN users recipient ON recipient.id = n.recipient_id
+		WHERE (n.sender_id = $1 AND n.recipient_id = $2) OR (n.sender_id = $2 AND n.recipient_id = $1)
+		ORDER BY n.created_at ASC
+		LIMIT 100`, userID, peerID)
+	if err != nil {
+		writeJSON(response, http.StatusInternalServerError, map[string]string{"error": "failed to load security notices"})
+		return
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	items := make([]SecurityNotice, 0)
+	for rows.Next() {
+		var item SecurityNotice
+		if err := rows.Scan(&item.ID, &item.IncidentID, &item.Sender, &item.Recipient, &item.Kind, &item.Verdict, &item.Severity, &item.FileName, &item.FileHash, &item.Reason, &item.Report, &item.CreatedAt); err != nil {
+			writeJSON(response, http.StatusInternalServerError, map[string]string{"error": "failed to read security notices"})
+			return
+		}
+		if len(item.Report) == 0 {
+			item.Report = json.RawMessage(`{}`)
+		}
+		items = append(items, item)
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Service) contacts(response http.ResponseWriter, request *http.Request) {
@@ -316,6 +563,10 @@ func (s *Service) messages(response http.ResponseWriter, request *http.Request) 
 		WHERE ((owner_id=$1 AND peer_id=$2) OR (owner_id=$2 AND peer_id=$1)) AND blocked=true)`, userID, recipientID).Scan(&blocked)
 	if blocked {
 		writeJSON(response, http.StatusForbidden, map[string]string{"error": "dialog blocked"})
+		return
+	}
+	if decision := s.spam.CheckDM(userID, recipientID); !decision.Allowed {
+		writeSpam(response, decision)
 		return
 	}
 	var id int64
@@ -856,6 +1107,18 @@ func (s *Service) user(request *http.Request) (int64, string, string, bool) {
 		FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.refresh_token=$1 AND u.banned=false LIMIT 1`, cookie.Value).
 		Scan(&id, &login, &display)
 	return id, login, display, err == nil
+}
+
+func writeSpam(response http.ResponseWriter, decision spamguard.Decision) {
+	retryAfter := decision.RetryAfterSeconds()
+	if retryAfter > 0 {
+		response.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	}
+	writeJSON(response, http.StatusTooManyRequests, map[string]any{
+		"error":             "too many requests",
+		"reason":            decision.Reason,
+		"retryAfterSeconds": retryAfter,
+	})
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {

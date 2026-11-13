@@ -84,7 +84,9 @@ func (p *Provider) proxyFunc(request *http.Request) (*url.URL, error) {
 
 // ProxyFunc — для gorilla/websocket Dialer.
 func ProxyFunc() func(*http.Request) (*url.URL, error) {
-	return defaultProvider.proxyFunc
+	return func(request *http.Request) (*url.URL, error) {
+		return defaultProvider.proxyFunc(request)
+	}
 }
 
 // NewHTTPClient — клиент, использующий актуальный прокси на каждый запрос.
@@ -96,7 +98,7 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
-			Proxy:                 defaultProvider.proxyFunc,
+			Proxy:                 ProxyFunc(),
 			MaxIdleConns:          32,
 			IdleConnTimeout:       30 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,

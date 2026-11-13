@@ -134,6 +134,23 @@ func (s *Service) IsAdmin(login string) bool {
 	return s.Role(login) == "owner" || s.Role(login) == "admin"
 }
 
+func (s *Service) IsGroupAdmin(login string) bool {
+	login = normalize(login)
+	if login == "" || s.db == nil {
+		return false
+	}
+
+	var allowed bool
+	err := s.db.QueryRowContext(context.Background(), `
+		SELECT EXISTS(
+			SELECT 1 FROM streamer_group_members m
+			JOIN users u ON u.id = m.user_id
+			WHERE lower(u.username) = $1 AND m.role IN ('owner', 'admin')
+		)`, login).Scan(&allowed)
+
+	return err == nil && allowed
+}
+
 func (s *Service) load() {
 	if s.db == nil {
 		return
@@ -326,6 +343,25 @@ func RegisterRoutes(srv Deps, service *Service) {
 		}
 
 		writeJSON(response, http.StatusOK, service.SetRole(body.Login, body.Role))
+	})
+
+	srv.ServeEndpoint("/rgg-sync/access/membership", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+
+			return
+		}
+		login := service.LoginFromRequest(request)
+		if login == "" {
+			writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "authorization required"})
+
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]any{
+			"login":      login,
+			"role":       service.Role(login),
+			"groupAdmin": service.IsGroupAdmin(login),
+		})
 	})
 }
 

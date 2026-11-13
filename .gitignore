@@ -3,3 +3,5 @@ dumps/
 
 .env.simple
 .idea/
+
+coverage.out

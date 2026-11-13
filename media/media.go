@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image/jpeg"
 	"image/png"
@@ -23,6 +24,7 @@ import (
 	"github.com/disintegration/imaging"
 
 	"github.com/p7x-dev/nameless-streamhata-backend/netcfg"
+	"github.com/p7x-dev/nameless-streamhata-backend/security"
 )
 
 type Deps interface {
@@ -144,7 +146,11 @@ func SaveFile(file io.Reader, filename string, allowedExtensions map[string]bool
 	return "/rgg-sync/media/file/" + name, nil
 }
 
-func RegisterRoutes(srv Deps) {
+func RegisterRoutes(srv Deps, scanners ...*security.Scanner) {
+	var scanner *security.Scanner
+	if len(scanners) > 0 {
+		scanner = scanners[0]
+	}
 	srv.ServeEndpoint("/rgg-sync/media/upload", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
@@ -178,6 +184,34 @@ func RegisterRoutes(srv Deps) {
 			return
 		}
 
+		data, err := io.ReadAll(io.LimitReader(file, 25<<20))
+		if err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "не удалось прочитать файл"})
+
+			return
+		}
+		if scanner != nil && scanner.Enabled() {
+			report, scanErr := scanner.Scan(request.Context(), data, security.ScanMeta{
+				FileName: header.Filename,
+				Mime:     header.Header.Get("Content-Type"),
+			})
+			if errors.Is(scanErr, security.ErrScanUnavailable) {
+				writeJSON(response, http.StatusServiceUnavailable, map[string]any{"error": "security scan is unavailable", "scan": report})
+
+				return
+			}
+			if scanErr != nil && !errors.Is(scanErr, security.ErrScannerDisabled) {
+				writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "security scan failed"})
+
+				return
+			}
+			if scanErr == nil && report.Verdict == security.ScanBlocked {
+				writeJSON(response, http.StatusUnprocessableEntity, map[string]any{"error": "file blocked by security scan", "scan": report})
+
+				return
+			}
+		}
+
 		directory := UploadDirectory()
 
 		if err := os.MkdirAll(directory, 0o755); err != nil {
@@ -201,10 +235,10 @@ func RegisterRoutes(srv Deps) {
 			return
 		}
 
-		_, copyErr := io.Copy(target, file)
+		_, writeErr := target.Write(data)
 		closeErr := target.Close()
 
-		if copyErr != nil || closeErr != nil {
+		if writeErr != nil || closeErr != nil {
 			_ = os.Remove(filepath.Join(directory, name))
 			writeJSON(response, http.StatusInternalServerError, map[string]string{"error": "не удалось сохранить файл"})
 

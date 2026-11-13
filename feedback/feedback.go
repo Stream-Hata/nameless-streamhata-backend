@@ -123,8 +123,8 @@ func New(db *sql.DB, users data_base.Database[data_base.User], tokens data_base.
 		lastSeen:       make(map[string]time.Time),
 		issueSnapshots: make(map[string]issueSnapshot),
 		http:           newHTTPClient(),
-		lokiURL:        envOr("LOKI_URL", "http://10.66.0.2:3100"),
-		prometheusURL:  envOr("PROMETHEUS_URL", "http://10.66.0.2:9090"),
+		lokiURL:        envOr("LOKI_URL", "http://127.0.0.1:3100"),
+		prometheusURL:  envOr("PROMETHEUS_URL", "http://127.0.0.1:9090"),
 	}
 	service.load()
 

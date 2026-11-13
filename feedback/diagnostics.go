@@ -35,7 +35,7 @@ var diagnosticsSources = []struct {
 	Label string
 	Query string
 }{
-	{"backend", "Backend (nsh-backend)", `{host="streamhata-main", unit="nsh-backend.service"}`},
+	{"backend", "Backend (nsh-backend)", `{host="streamhata-main", unit="streamhata-backend.service"}`},
 	{"nginx", "Nginx", `{host="streamhata-main", job="nginx"}`},
 	{"database", "Database server (journal)", `{host="db-2"}`},
 	{"postgres", "PostgreSQL", `{host="db-2", unit="postgresql.service"}`},

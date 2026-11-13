@@ -43,6 +43,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/messaging"
 	"github.com/p7x-dev/nameless-streamhata-backend/metrics"
 	"github.com/p7x-dev/nameless-streamhata-backend/moderation"
+	"github.com/p7x-dev/nameless-streamhata-backend/mods"
 	"github.com/p7x-dev/nameless-streamhata-backend/music"
 	"github.com/p7x-dev/nameless-streamhata-backend/netcfg"
 	"github.com/p7x-dev/nameless-streamhata-backend/notifications"
@@ -53,6 +54,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/quotes"
 	"github.com/p7x-dev/nameless-streamhata-backend/redemptions"
 	"github.com/p7x-dev/nameless-streamhata-backend/roulette"
+	"github.com/p7x-dev/nameless-streamhata-backend/security"
 	"github.com/p7x-dev/nameless-streamhata-backend/server"
 	"github.com/p7x-dev/nameless-streamhata-backend/seventv"
 	"github.com/p7x-dev/nameless-streamhata-backend/statuspage"
@@ -62,6 +64,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/syncstate"
 	"github.com/p7x-dev/nameless-streamhata-backend/timers"
 	"github.com/p7x-dev/nameless-streamhata-backend/triggers"
+	"github.com/p7x-dev/nameless-streamhata-backend/trust"
 	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 	"github.com/p7x-dev/nameless-streamhata-backend/vaultsecrets"
 	"github.com/p7x-dev/nameless-streamhata-backend/viewer"
@@ -72,16 +75,21 @@ import (
 // webhookProviders — сервисы, которые шлют донаты вебхуками на наш URL.
 var webhookProviders = []string{"donationto", "donatestream", "donatepay", "generic"}
 
-func telegramPollingActive() bool {
-	if os.Getenv("TELEGRAM_BOT_DISABLED") == "1" {
-		return false
-	}
+func nodeActive() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("NODE_ACTIVE"))) {
 	case "0", "false", "no", "standby":
 		return false
 	default:
 		return true
 	}
+}
+
+func telegramPollingActive() bool {
+	if os.Getenv("TELEGRAM_BOT_DISABLED") == "1" {
+		return false
+	}
+
+	return nodeActive()
 }
 
 func main() {
@@ -204,13 +212,23 @@ func main() {
 	accessService := access.New(musicDB)
 	access.RegisterRoutes(srv, accessService)
 
-	blogService := blog.New(musicDB, accessService)
+	securityService := security.New(musicDB, accessService)
+	security.RegisterRoutes(srv, securityService)
+	trustService := trust.New(musicDB, accessService)
+	trust.RegisterRoutes(srv, trustService)
+	modsService := mods.New(musicDB, accessService)
+	mods.RegisterRoutes(srv, modsService)
+	if nodeActive() {
+		go securityService.RunSLA(ctx)
+	}
+
+	blogService := blog.New(musicDB, accessService, securityService)
 	blogService.RegisterRoutes(srv)
 
 	suggestionsService := suggestions.New(musicDB, accessService)
 	suggestionsService.RegisterRoutes(srv)
 
-	messagingService := messaging.New(musicDB)
+	messagingService := messaging.New(musicDB, securityService, modsService)
 	messagingService.RegisterRoutes(srv)
 
 	desktopAuthService := desktopauth.New(musicDB)
@@ -251,7 +269,7 @@ func main() {
 	if err := media.InitObjectStore(); err != nil {
 		log.Printf("[media] object storage unavailable, using local disk: %v", err)
 	}
-	media.RegisterRoutes(srv)
+	media.RegisterRoutes(srv, securityService.FileScanner())
 
 	alertsService := alerts.New()
 	alerts.RegisterRoutes(srv, alertsService)
@@ -273,6 +291,11 @@ func main() {
 		log.Printf("[Telegram] polling disabled on standby node")
 	}
 	notify.RegisterRoutes(srv, notifyService)
+	if nodeActive() {
+		securityService.SetNotifier(func(ctx context.Context, incident security.Incident) error {
+			return notifyService.SendTelegramText(ctx, security.TelegramText(incident))
+		})
+	}
 	musicService.SetTelegramSender(notifyService.SendTelegramText)
 	musicService.SetTelegramPageSender(notifyService.SendTelegramPage)
 
