@@ -148,3 +148,22 @@ func contentTypeForName(name string) string {
 		return "application/octet-stream"
 	}
 }
+
+func openObjectRange(name string, start, end int64) (io.ReadCloser, bool) {
+	storeMu.RLock()
+	current := store
+	storeMu.RUnlock()
+
+	if current == nil {
+		return nil, false
+	}
+
+	options := minio.GetObjectOptions{}
+	options.SetRange(start, end)
+	object, err := current.client.GetObject(context.Background(), current.bucket, name, options)
+	if err != nil {
+		return nil, false
+	}
+
+	return object, true
+}

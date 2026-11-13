@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -273,6 +274,21 @@ func RegisterRoutes(srv Deps, scanners ...*security.Scanner) {
 				contentType = "application/octet-stream"
 			}
 			response.Header().Set("Content-Type", contentType)
+			response.Header().Set("Accept-Ranges", "bytes")
+			if start, end, ranged := byteRange(request.Header.Get("Range"), size); ranged {
+				if rangedObject, rangedOK := openObjectRange(name, start, end); rangedOK {
+					_ = object.Close()
+					defer func() {
+						_ = rangedObject.Close()
+					}()
+					response.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+					response.Header().Set("Content-Length", fmt.Sprintf("%d", end-start+1))
+					response.WriteHeader(http.StatusPartialContent)
+					_, _ = io.Copy(response, rangedObject)
+
+					return
+				}
+			}
 			if size > 0 {
 				response.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 			}
@@ -662,4 +678,43 @@ func writeJSON(response http.ResponseWriter, status int, payload any) {
 	response.WriteHeader(status)
 
 	_ = json.NewEncoder(response).Encode(payload)
+}
+
+func byteRange(value string, size int64) (int64, int64, bool) {
+	value = strings.TrimSpace(value)
+	if size <= 0 || !strings.HasPrefix(value, "bytes=") {
+		return 0, 0, false
+	}
+	value = strings.TrimPrefix(value, "bytes=")
+	parts := strings.SplitN(value, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	if parts[0] == "" {
+		suffix, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || suffix <= 0 {
+			return 0, 0, false
+		}
+		if suffix > size {
+			suffix = size
+		}
+
+		return size - suffix, size - 1, true
+	}
+	start, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || start < 0 || start >= size {
+		return 0, 0, false
+	}
+	end := size - 1
+	if parts[1] != "" {
+		end, err = strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || end < start {
+			return 0, 0, false
+		}
+		if end >= size {
+			end = size - 1
+		}
+	}
+
+	return start, end, true
 }
