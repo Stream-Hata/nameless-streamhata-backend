@@ -82,6 +82,11 @@ func RegisterRoutes(srv Deps, service *Service) {
 	srv.ServeEndpoint("/rgg-sync/trust/releases/latest", service.latestRoute)
 	srv.ServeEndpoint("/rgg-sync/trust/releases", service.releaseRoute)
 	srv.ServeEndpoint("/rgg-sync/trust/verify", service.verifyRoute)
+	srv.ServeEndpoint("/rgg-sync/trust/admin", service.adminDataRoute)
+	srv.ServeEndpoint("/rgg-sync/trust/admin/publishers", service.publisherRoute)
+	srv.ServeEndpoint("/rgg-sync/trust/admin/products", service.productRoute)
+	srv.ServeEndpoint("/rgg-sync/trust/admin/sources", service.sourceRoute)
+	srv.ServeEndpoint("/rgg-sync/trust/admin/releases/{id}", service.releaseAdminRoute)
 }
 
 func (s *Service) Latest(ctx context.Context, productSlug, platform, channel string) (Release, error) {
@@ -279,6 +284,19 @@ func (s *Service) latestRoute(response http.ResponseWriter, request *http.Reques
 }
 
 func (s *Service) releaseRoute(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodGet {
+		if !s.authorized(request) {
+			writeJSON(response, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		items, err := s.adminReleases(request.Context())
+		if err != nil {
+			writeJSON(response, http.StatusInternalServerError, map[string]string{"error": "failed to load releases"})
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"items": items})
+		return
+	}
 	if request.Method != http.MethodPost {
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 		return
