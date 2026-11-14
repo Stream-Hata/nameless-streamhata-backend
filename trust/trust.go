@@ -82,6 +82,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 	srv.ServeEndpoint("/rgg-sync/trust/releases/latest", service.latestRoute)
 	srv.ServeEndpoint("/rgg-sync/trust/releases", service.releaseRoute)
 	srv.ServeEndpoint("/rgg-sync/trust/verify", service.verifyRoute)
+	srv.ServeEndpoint("/rgg-sync/trust/manifest/validate", service.manifestValidateRoute)
 	srv.ServeEndpoint("/rgg-sync/trust/admin", service.adminDataRoute)
 	srv.ServeEndpoint("/rgg-sync/trust/admin/publishers", service.publisherRoute)
 	srv.ServeEndpoint("/rgg-sync/trust/admin/products", service.productRoute)
