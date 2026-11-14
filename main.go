@@ -39,6 +39,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/integrations"
 	"github.com/p7x-dev/nameless-streamhata-backend/llm"
 	"github.com/p7x-dev/nameless-streamhata-backend/lots"
+	"github.com/p7x-dev/nameless-streamhata-backend/marketplace"
 	"github.com/p7x-dev/nameless-streamhata-backend/media"
 	"github.com/p7x-dev/nameless-streamhata-backend/messaging"
 	"github.com/p7x-dev/nameless-streamhata-backend/metrics"
@@ -218,6 +219,8 @@ func main() {
 	trust.RegisterRoutes(srv, trustService)
 	modsService := mods.New(musicDB, accessService)
 	mods.RegisterRoutes(srv, modsService)
+	marketplaceService := marketplace.New(musicDB, accessService)
+	marketplace.RegisterRoutes(srv, marketplaceService)
 	if nodeActive() {
 		go securityService.RunSLA(ctx)
 	}
