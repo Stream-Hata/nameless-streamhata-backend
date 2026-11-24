@@ -159,7 +159,7 @@ func TestSchedulerStartsJuryForAdvice(t *testing.T) {
 }
 
 func TestSchedulerIgnoresLowConfidence(t *testing.T) {
-	chatService := chat.NewService(10)
+	chatService := chat.NewService(10, t.Context())
 	service := NewService(nil)
 	_ = NewScheduler(service, fakeClassifier{advice: true, confidence: 0.2}, chatService)
 
