@@ -130,7 +130,7 @@ func TestSettingsValidation(t *testing.T) {
 }
 
 func TestSchedulerStartsJuryForAdvice(t *testing.T) {
-	chatService := chat.NewService(10)
+	chatService := chat.NewService(10, t.Context())
 	service := NewService(fakeVerdicts{text: "ok"})
 	scheduler := NewScheduler(service, fakeClassifier{advice: true, confidence: 0.9}, chatService)
 	_ = scheduler

@@ -1,9 +1,12 @@
 package chat
 
 import (
+	"context"
+	"fmt"
 	"sync"
 
 	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
+	gt "gopkg.gilang.dev/translator/v2"
 )
 
 // Sink — обработчик входящих сообщений чата.
@@ -16,6 +19,7 @@ type Writer interface {
 
 // Service — кольцевой буфер чата с дедупликацией и подписчиками.
 type Service struct {
+	ctx      context.Context
 	mu       sync.Mutex
 	messages []twitch.TwitchChatMessage
 	seen     map[string]struct{}
@@ -26,12 +30,13 @@ type Service struct {
 	nextID   int
 }
 
-func NewService(maxMessages int) *Service {
+func NewService(maxMessages int, ctx context.Context) *Service {
 	if maxMessages <= 0 {
 		maxMessages = 500
 	}
 
 	return &Service{
+		ctx:      ctx,
 		messages: make([]twitch.TwitchChatMessage, 0, maxMessages),
 		seen:     make(map[string]struct{}),
 		channels: make(map[string]struct{}),
@@ -54,6 +59,11 @@ func (s *Service) Receive(message twitch.TwitchChatMessage) {
 		s.seen[message.MessageID] = struct{}{}
 	}
 
+	translated, err := gt.Translate(s.ctx, message.Text, "ru")
+	if err != nil {
+		message.Text = fmt.Sprintf("Ошибка перевода, оригинвльный текст: %s", message.Text)
+	}
+	message.Text = translated.Text
 	s.messages = append(s.messages, message)
 
 	if len(s.messages) > s.max {
