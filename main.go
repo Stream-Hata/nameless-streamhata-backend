@@ -147,7 +147,7 @@ func main() {
 
 	// Шина чата: IRC/EventSub рантайм пишет, подписчики (музыка, команды,
 	// жюри) — читают.
-	chatService := chat.NewService(500, ctx)
+	chatService := chat.NewService(500)
 
 	musicDB, err := data_base.NewConnection(ctx)
 	if err != nil {

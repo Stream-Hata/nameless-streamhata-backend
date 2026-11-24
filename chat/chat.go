@@ -3,10 +3,10 @@ package chat
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
-	gt "gopkg.gilang.dev/translator/v2"
 )
 
 // Sink — обработчик входящих сообщений чата.
@@ -19,7 +19,6 @@ type Writer interface {
 
 // Service — кольцевой буфер чата с дедупликацией и подписчиками.
 type Service struct {
-	ctx      context.Context
 	mu       sync.Mutex
 	messages []twitch.TwitchChatMessage
 	seen     map[string]struct{}
@@ -30,13 +29,12 @@ type Service struct {
 	nextID   int
 }
 
-func NewService(maxMessages int, ctx context.Context) *Service {
+func NewService(maxMessages int) *Service {
 	if maxMessages <= 0 {
 		maxMessages = 500
 	}
 
 	return &Service{
-		ctx:      ctx,
 		messages: make([]twitch.TwitchChatMessage, 0, maxMessages),
 		seen:     make(map[string]struct{}),
 		channels: make(map[string]struct{}),
@@ -47,6 +45,7 @@ func NewService(maxMessages int, ctx context.Context) *Service {
 
 // Receive добавляет сообщение в буфер и раздаёт подписчикам.
 func (s *Service) Receive(message twitch.TwitchChatMessage) {
+	llmTranslator := NewLLMTranslator(context.Background())
 	s.mu.Lock()
 
 	if message.MessageID != "" {
@@ -59,11 +58,17 @@ func (s *Service) Receive(message twitch.TwitchChatMessage) {
 		s.seen[message.MessageID] = struct{}{}
 	}
 
-	translated, err := gt.Translate(s.ctx, message.Text, "ru")
+	s.mu.Unlock()
+
+	s.mu.Lock()
+
+	translated, err := llmTranslator.Translate(message.Text)
 	if err != nil {
-		message.Text = fmt.Sprintf("Ошибка перевода, оригинвльный текст: %s", message.Text)
+		message.Text = fmt.Sprintf("%w. Оригнальный текст: %s", err, message.Text)
 	}
-	message.Text = translated.Text
+
+	message.Text = translated
+
 	s.messages = append(s.messages, message)
 
 	if len(s.messages) > s.max {
@@ -87,6 +92,21 @@ func (s *Service) Receive(message twitch.TwitchChatMessage) {
 	for _, sink := range sinks {
 		sink(message)
 	}
+}
+
+// normalizeMessage исправляет транслит и текст в неправильной раскладке.
+// Команды (сообщения с "!") не трогаем, иначе ломаются триггеры.
+func normalizeMessage(message twitch.TwitchChatMessage) twitch.TwitchChatMessage {
+	text := strings.TrimSpace(message.Text)
+	if text == "" || strings.HasPrefix(text, "!") {
+		return message
+	}
+
+	if normalized := normalizeText(message.Text); normalized != "" {
+		message.Text = normalized
+	}
+
+	return message
 }
 
 // Subscribe регистрирует обработчик; возвращает функцию отписки.

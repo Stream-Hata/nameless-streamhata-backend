@@ -502,9 +502,9 @@ func voteIntent(text string) (yea, nei bool) {
 	}
 
 	switch token {
-	case "ya", "yea", "yeah", "yes", "yay", "+", "+1", "✅", "✔":
+	case "ya", "yea", "yeah", "yes", "yay", "+", "+1", "✅", "✔", "да", "ага":
 		return true, false
-	case "nei", "ney", "no", "nope", "-", "-1", "❌", "✖":
+	case "nei", "ney", "no", "nope", "-", "-1", "❌", "✖", "нет", "неа":
 		return false, true
 	}
 
