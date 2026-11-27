@@ -754,7 +754,7 @@ func validReturnURL(value string) bool {
 
 	host := parsed.Hostname()
 
-	return host == "streamhata.rdpctd.dev" || host == "ru.streamhata.rdpctd.dev" || host == "streamhata-admin.rdpctd.dev"
+	return host == "streamhata.rdpctd.dev" || host == "ru.streamhata.rdpctd.dev" || host == "streamhata-admin.rdpctd.dev" || host == "admin.streamhata.rdpctd.dev"
 }
 
 func cookieDomain() string {
