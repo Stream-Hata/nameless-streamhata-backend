@@ -40,6 +40,7 @@ var diagnosticsSources = []struct {
 	{"database", "Database server (journal)", `{host="db-2"}`},
 	{"postgres", "PostgreSQL", `{host="db-2", unit="postgresql.service"}`},
 	{"openbao", "OpenBao", `{host="db-2", unit="openbao.service"}`},
+	{"chat", "Twitch chat messages (user-filtered)", ``},
 }
 
 var diagnosticsMetrics = []struct {
@@ -54,6 +55,11 @@ var diagnosticsMetrics = []struct {
 	{"Database reachable", `nsh_db_up`},
 	{"Goroutines", `nsh_goroutines`},
 	{"Backend memory, bytes", `nsh_memory_alloc_bytes`},
+	{"Chat messages", `nsh_chat_messages_total`},
+	{"Chat duplicates discarded", `nsh_chat_deduplicated_total`},
+	{"Chat translation outcomes", `nsh_chat_translation_total`},
+	{"Chat log events dropped", `nsh_chat_loki_events_dropped_total`},
+	{"Chat Loki push failures", `nsh_chat_loki_push_failures_total`},
 	{"PostgreSQL up", `pg_up`},
 	{"PostgreSQL connections", `pg_stat_database_numbackends{datname="rgg"}`},
 	{"PostgreSQL size, bytes", `pg_database_size_bytes{datname="rgg"}`},
@@ -137,7 +143,15 @@ func (s *Service) collectDiagnostics(ctx context.Context, request DiagnosticsReq
 		if !selected[source.Key] {
 			continue
 		}
-		content, err := s.queryLoki(ctx, source.Query, start, end)
+		query := source.Query
+		if source.Key == "chat" {
+			if author == "" {
+				fmt.Fprintf(&result, "\n## %s\nНужна авторизация Twitch для фильтрации по автору.\n", source.Label)
+				continue
+			}
+			query = `{host="streamhata-main", job="streamhata-chat"} | json | author_login=` + strconv.Quote(author)
+		}
+		content, err := s.queryLoki(ctx, query, start, end)
 		if err != nil {
 			fmt.Fprintf(&result, "\n## %s\nОшибка: %v\n", source.Label, err)
 			continue
@@ -193,7 +207,7 @@ func (s *Service) queryLoki(ctx context.Context, query string, start, end time.T
 	if err != nil {
 		return nil, err
 	}
-	response, err := s.http.Do(request)
+	response, err := s.diagnosticsClient().Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +262,7 @@ func (s *Service) queryPrometheus(ctx context.Context, query string, start, end 
 	if err != nil {
 		return "", err
 	}
-	response, err := s.http.Do(request)
+	response, err := s.diagnosticsClient().Do(request)
 	if err != nil {
 		return "", err
 	}
@@ -308,6 +322,16 @@ func (s *Service) queryPrometheus(ctx context.Context, query string, start, end 
 	}
 
 	return result.String(), nil
+}
+
+func (s *Service) diagnosticsClient() *http.Client {
+	if s.monitoringHTTP != nil {
+		return s.monitoringHTTP
+	}
+	if s.http != nil {
+		return s.http
+	}
+	return http.DefaultClient
 }
 
 func formatDiagnosticsLabels(labels map[string]string) string {

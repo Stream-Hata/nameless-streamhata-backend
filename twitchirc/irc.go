@@ -37,8 +37,9 @@ type Options struct {
 type Client struct {
 	options Options
 
-	mu   sync.Mutex
-	conn *websocket.Conn
+	mu      sync.Mutex
+	conn    *websocket.Conn
+	writeMu sync.Mutex
 }
 
 func New(options Options) *Client {
@@ -100,7 +101,7 @@ func (c *Client) session(ctx context.Context) error {
 	}
 
 	for _, line := range handshake {
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(line)); err != nil {
+		if err := c.writeLine(conn, line); err != nil {
 			return err
 		}
 	}
@@ -131,6 +132,17 @@ func (c *Client) session(ctx context.Context) error {
 
 // Say отправляет PRIVMSG в канал.
 func (c *Client) Say(text string) error {
+	return c.send(text, "")
+}
+
+func (c *Client) Reply(parentID, text string) error {
+	if parentID == "" || strings.ContainsAny(parentID, " ;\\\r\n\t\x00") {
+		return fmt.Errorf("irc: invalid reply parent ID")
+	}
+	return c.send(text, "@reply-parent-msg-id="+parentID+" ")
+}
+
+func (c *Client) send(text, tags string) error {
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
@@ -139,15 +151,21 @@ func (c *Client) Say(text string) error {
 		return fmt.Errorf("irc: not connected")
 	}
 
-	return conn.WriteMessage(
-		websocket.TextMessage,
-		[]byte(fmt.Sprintf("PRIVMSG #%s :%s", c.options.Broadcaster.Login, text)),
-	)
+	return c.writeLine(conn, fmt.Sprintf("%sPRIVMSG #%s :%s", tags, c.options.Broadcaster.Login, text))
+}
+
+func (c *Client) writeLine(conn *websocket.Conn, line string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.TextMessage, []byte(line))
 }
 
 func (c *Client) handleLine(conn *websocket.Conn, line string) error {
 	if strings.HasPrefix(line, "PING") {
-		return conn.WriteMessage(websocket.TextMessage, []byte("PONG :tmi.twitch.tv"))
+		return c.writeLine(conn, "PONG :tmi.twitch.tv")
 	}
 
 	if strings.Contains(line, " RECONNECT") {

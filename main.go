@@ -27,13 +27,13 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/chat"
 	"github.com/p7x-dev/nameless-streamhata-backend/chatjury"
 	"github.com/p7x-dev/nameless-streamhata-backend/chatruntime"
-	"github.com/p7x-dev/nameless-streamhata-backend/clips"
 	"github.com/p7x-dev/nameless-streamhata-backend/commands"
 	"github.com/p7x-dev/nameless-streamhata-backend/credentials"
 	data_base "github.com/p7x-dev/nameless-streamhata-backend/data-base"
 	"github.com/p7x-dev/nameless-streamhata-backend/desktopauth"
 	"github.com/p7x-dev/nameless-streamhata-backend/donations"
 	"github.com/p7x-dev/nameless-streamhata-backend/events"
+	"github.com/p7x-dev/nameless-streamhata-backend/featurestatus"
 	"github.com/p7x-dev/nameless-streamhata-backend/feedback"
 	"github.com/p7x-dev/nameless-streamhata-backend/games"
 	"github.com/p7x-dev/nameless-streamhata-backend/integrations"
@@ -61,6 +61,7 @@ import (
 	"github.com/p7x-dev/nameless-streamhata-backend/statuspage"
 	"github.com/p7x-dev/nameless-streamhata-backend/steam"
 	"github.com/p7x-dev/nameless-streamhata-backend/stream"
+	"github.com/p7x-dev/nameless-streamhata-backend/streamersite"
 	"github.com/p7x-dev/nameless-streamhata-backend/suggestions"
 	"github.com/p7x-dev/nameless-streamhata-backend/syncstate"
 	"github.com/p7x-dev/nameless-streamhata-backend/timers"
@@ -132,6 +133,9 @@ func main() {
 	if err := data_base.Migrate(); err != nil {
 		log.Fatal(err)
 	}
+	if err := data_base.EncryptExistingTokensWithNewConnection(ctx); err != nil {
+		log.Fatalf("token encryption migration failed: %v", err)
+	}
 
 	useRepo, err := data_base.NewRepository[data_base.User](ctx)
 	if err != nil {
@@ -143,17 +147,21 @@ func main() {
 		log.Fatal(err)
 	}
 
-	twitch.TwitchAuth(srv, useRepo, tokenRepo)
-
+	llmClient := llm.NewFromEnv()
+	translator := chat.NewLLMTranslatorWithClient(ctx, llmClient)
 	// Шина чата: IRC/EventSub рантайм пишет, подписчики (музыка, команды,
 	// жюри) — читают.
-	chatService := chat.NewService(500)
+
+	chatService := chat.NewService(500, translator)
+	chatLoki := chat.NewLokiLogger()
+	chatService.SetObserver(chatLoki.Observe)
 
 	musicDB, err := data_base.NewConnection(ctx)
 	if err != nil {
-		log.Printf("[Music] running without persistence: %v", err)
-		musicDB = nil
+		log.Fatal(err)
 	}
+	twitchSessions := twitch.NewSessions(musicDB, useRepo, tokenRepo)
+	twitch.TwitchAuth(srv, useRepo, tokenRepo, twitchSessions)
 
 	startedAt := time.Now()
 	srv.ServeEndpoint("/rgg-sync/prometheus", func(response http.ResponseWriter, request *http.Request) {
@@ -169,6 +177,14 @@ func main() {
 		fmt.Fprintf(response, "# HELP nsh_goroutines Current goroutines.\n# TYPE nsh_goroutines gauge\nnsh_goroutines %d\n", runtime.NumGoroutine())
 		fmt.Fprintf(response, "# HELP nsh_memory_alloc_bytes Allocated memory.\n# TYPE nsh_memory_alloc_bytes gauge\nnsh_memory_alloc_bytes %d\n", mem.Alloc)
 		fmt.Fprintf(response, "# HELP nsh_db_up Database reachable.\n# TYPE nsh_db_up gauge\nnsh_db_up %d\n", dbUp)
+		chatMetrics := chatService.Metrics()
+		lokiDropped, lokiFailed := chatLoki.Metrics()
+		fmt.Fprintf(response, "# HELP nsh_chat_messages_total Accepted Twitch chat messages.\n# TYPE nsh_chat_messages_total counter\nnsh_chat_messages_total %d\n", chatMetrics.Received)
+		fmt.Fprintf(response, "# HELP nsh_chat_deduplicated_total Duplicate Twitch chat messages discarded.\n# TYPE nsh_chat_deduplicated_total counter\nnsh_chat_deduplicated_total %d\n", chatMetrics.Deduplicated)
+		fmt.Fprintf(response, "# HELP nsh_chat_translation_total Chat translation attempts by result.\n# TYPE nsh_chat_translation_total counter\n")
+		fmt.Fprintf(response, "nsh_chat_translation_total{result=\"translated\"} %d\nnsh_chat_translation_total{result=\"failed\"} %d\nnsh_chat_translation_total{result=\"unchanged\"} %d\nnsh_chat_translation_total{result=\"skipped\"} %d\n", chatMetrics.Translated, chatMetrics.TranslationFailed, chatMetrics.Unchanged, chatMetrics.Skipped)
+		fmt.Fprintf(response, "# HELP nsh_chat_loki_events_dropped_total Chat log events dropped because the buffer was full.\n# TYPE nsh_chat_loki_events_dropped_total counter\nnsh_chat_loki_events_dropped_total %d\n", lokiDropped)
+		fmt.Fprintf(response, "# HELP nsh_chat_loki_push_failures_total Failed Loki push attempts.\n# TYPE nsh_chat_loki_push_failures_total counter\nnsh_chat_loki_push_failures_total %d\n", lokiFailed)
 	})
 
 	srv.ServeEndpoint("/health", func(response http.ResponseWriter, request *http.Request) {
@@ -201,7 +217,6 @@ func main() {
 	events.RegisterRoutes(srv, eventsService)
 
 	widgetsService := widgets.New(musicDB)
-	widgets.RegisterRoutes(srv, widgetsService)
 
 	catalogService := catalog.New(musicDB)
 	catalogService.StartTranslationWorker(context.Background())
@@ -210,8 +225,10 @@ func main() {
 	rouletteService := roulette.New(musicDB, catalogService)
 	rouletteService.RegisterRoutes(srv)
 
-	accessService := access.New(musicDB)
+	accessService := access.New(musicDB, twitchSessions)
 	access.RegisterRoutes(srv, accessService)
+	featureStatusService := featurestatus.New(musicDB, accessService)
+	featureStatusService.RegisterRoutes(srv)
 
 	securityService := security.New(musicDB, accessService)
 	security.RegisterRoutes(srv, securityService)
@@ -228,13 +245,16 @@ func main() {
 	blogService := blog.New(musicDB, accessService, securityService)
 	blogService.RegisterRoutes(srv)
 
+	streamerSiteService := streamersite.New(musicDB, accessService, securityService)
+	streamerSiteService.RegisterRoutes(srv)
+
 	suggestionsService := suggestions.New(musicDB, accessService)
 	suggestionsService.RegisterRoutes(srv)
 
 	messagingService := messaging.New(musicDB, securityService, modsService)
 	messagingService.RegisterRoutes(srv)
 
-	desktopAuthService := desktopauth.New(musicDB)
+	desktopAuthService := desktopauth.New(musicDB, twitchSessions)
 	desktopAuthService.RegisterRoutes(srv)
 
 	notificationsService := notifications.New(musicDB)
@@ -245,40 +265,35 @@ func main() {
 	steam.NewLinkService(musicDB, steamService, os.Getenv("PUBLIC_URL")).Register(srv)
 
 	networkProvider := netcfg.Init(musicDB)
-	netcfg.RegisterRoutes(srv, networkProvider)
+	netcfg.RegisterRoutes(srv, networkProvider, func(request *http.Request) bool {
+		login := accessService.LoginFromRequest(request)
+		return login != "" && accessService.IsOwner(login)
+	})
 
 	triggersService := triggers.New(musicDB)
-	triggers.RegisterRoutes(srv, triggersService)
 
 	musicService := music.NewService(musicDB)
-	music.RegisterRoutes(srv, musicService)
-	chat.RegisterRoutes(srv, chatService)
 
-	// Чат-жюри: классификатор и вердикты — Groq (при наличии ключа).
-	llmClient := llm.NewGroq(os.Getenv("GROQ_API_KEY"), os.Getenv("GROQ_MODEL"))
+	// Translation and chat jury share the configured provider (Groq/OpenRouter).
+	registerLLMCredentialsRoute(srv, accessService, llmClient)
 
 	juryService := chatjury.NewService(llmClient)
 	juryScheduler := chatjury.NewScheduler(juryService, llmClient, chatService)
 	juryScheduler.SetTriggers(triggersService)
-	chatjury.RegisterRoutes(srv, juryService)
 
 	donationsService := registerDonations(srv, ctx, musicDB)
 
 	viewerRuntime := viewer.New(os.Getenv("TWITCH_CLIENT_KEY"))
-	viewer.RegisterRoutes(srv, viewerRuntime)
 
 	syncService := syncstate.New()
-	syncstate.RegisterRoutes(srv, syncService)
 	if err := media.InitObjectStore(); err != nil {
 		log.Printf("[media] object storage unavailable, using local disk: %v", err)
 	}
 	media.RegisterRoutes(srv, securityService.FileScanner())
 
 	alertsService := alerts.New()
-	alerts.RegisterRoutes(srv, alertsService)
 
 	sevenTVService := seventv.New()
-	seventv.RegisterRoutes(srv, sevenTVService)
 	go sevenTVService.Run(ctx)
 
 	notifyService := notify.New(musicDB)
@@ -309,12 +324,62 @@ func main() {
 	chatRuntime := chatruntime.New(
 		os.Getenv("TWITCH_CLIENT_KEY"),
 		os.Getenv("TWITCH_SECRET_KEY"),
+		accessService.Get().Owners,
 		useRepo,
 		tokenRepo,
 		chatService,
 		viewerRuntime,
 		alertsService,
+		musicDB,
 	)
+	loadAutoTranslationSetting(musicDB, chatRuntime.CurrentChannelID(), chatService)
+
+	chatService.SetWriter(chatRuntime)
+	enableMusicTitleQueue(ctx, chatService, musicService, chatRuntime)
+	primaryRoutes := primaryChannelRoutes{Server: srv, sessions: twitchSessions, runtime: chatRuntime}
+	commandsService := commands.New(chatRuntime, musicDB)
+	timersService := timers.New(chatRuntime)
+	primaryChat := &connectedChat{
+		runtime: chatRuntime, history: chatService, commands: commandsService, timers: timersService,
+		triggers: triggersService, jury: juryService, viewers: viewerRuntime,
+		alerts: alertsService, widgets: widgetsService, emotes: sevenTVService, syncState: syncService, music: musicService,
+	}
+	channelChats := newChannelChats(ctx, translator, llmClient, useRepo, tokenRepo, twitchSessions, musicDB, primaryChat)
+	chat.RegisterRoutes(srv, func(response http.ResponseWriter, request *http.Request) (*chat.Service, string) {
+		channel, channelID := channelChats.resolveWidgetRead(response, request)
+		if channel == nil {
+			return nil, ""
+		}
+		return channel.history, channelID
+	})
+	srv.ServeEndpoint("/rgg-sync/chat/translation", func(response http.ResponseWriter, request *http.Request) {
+		channel, channelID := channelChats.resolveWidgetRead(response, request)
+		if channel == nil {
+			return
+		}
+		switch request.Method {
+		case http.MethodGet:
+			response.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_ = json.NewEncoder(response).Encode(map[string]bool{"enabled": channel.history.AutoTranslationEnabled()})
+		case http.MethodPost:
+			var body struct {
+				Enabled *bool `json:"enabled"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(response, request.Body, 1024)).Decode(&body); err != nil || body.Enabled == nil {
+				http.Error(response, "invalid json", http.StatusBadRequest)
+				return
+			}
+			if _, err := musicDB.ExecContext(request.Context(), `INSERT INTO chat_translation_settings(channel_id,auto_translation_enabled) VALUES($1,$2) ON CONFLICT(channel_id) DO UPDATE SET auto_translation_enabled=EXCLUDED.auto_translation_enabled,updated_at=now()`, channelID, *body.Enabled); err != nil {
+				http.Error(response, "could not save translation setting", http.StatusInternalServerError)
+				return
+			}
+			channel.history.SetAutoTranslationEnabled(*body.Enabled)
+			response.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_ = json.NewEncoder(response).Encode(map[string]bool{"enabled": *body.Enabled})
+		default:
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 
 	srv.ServeEndpoint("/rgg-sync/chat/send", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
@@ -322,15 +387,9 @@ func main() {
 
 			return
 		}
-		cookie, err := request.Cookie("e-hub-refresh-token")
-		if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		user, token, err := twitchSessions.Account(request)
+		if err != nil {
 			http.Error(response, "unauthorized", http.StatusUnauthorized)
-
-			return
-		}
-		if _, err := tokenRepo.Find(data_base.Where{Column: "refresh_token", Value: cookie.Value}); err != nil {
-			http.Error(response, "unauthorized", http.StatusUnauthorized)
-
 			return
 		}
 		var body struct {
@@ -348,11 +407,18 @@ func main() {
 
 			return
 		}
-		channel := strings.TrimSpace(body.Channel)
-		if channel == "" {
-			channel = chatRuntime.CurrentChannelLogin()
+		channel := strings.TrimPrefix(strings.TrimSpace(body.Channel), "#")
+		channelChat, err := channelChats.connectUser(user)
+		if err != nil {
+			http.Error(response, "Twitch chat unavailable", http.StatusBadGateway)
+			return
 		}
-		if err := chatRuntime.SayTo(request.Context(), channel, text); err != nil {
+		if channel == "" || strings.EqualFold(channel, user.Username) {
+			err = channelChat.runtime.SendAsBroadcaster(request.Context(), token.AccessToken, strconv.FormatInt(user.TwitchUserID, 10), text)
+		} else {
+			err = channelChat.runtime.SayTo(request.Context(), channel, text)
+		}
+		if err != nil {
 			http.Error(response, err.Error(), http.StatusBadGateway)
 
 			return
@@ -362,7 +428,7 @@ func main() {
 	})
 
 	welcomeService := welcome.New(musicDB, chatRuntime)
-	welcome.RegisterRoutes(srv, welcomeService)
+	primaryChat.welcome = welcomeService
 
 	ttsService := donations.NewTTS(musicDB, chatRuntime)
 	ttsService.SetStatsProvider(func() []string {
@@ -379,185 +445,69 @@ func main() {
 
 		return result
 	})
-	donations.RegisterTTSRoutes(srv, donationsService, ttsService)
+	donations.RegisterTTSRoutes(primaryRoutes, donationsService, ttsService)
 
 	rouletteService.SetWriter(chatRuntime)
 
-	commandsService := commands.New(chatRuntime, musicDB)
-	commands.RegisterRoutes(srv, commandsService)
-
-	timersService := timers.New(chatRuntime)
-	timers.RegisterRoutes(srv, timersService)
+	commands.RegisterRoutes(srv, func(response http.ResponseWriter, request *http.Request) *commands.Service {
+		channel, _ := channelChats.resolve(response, request)
+		if channel == nil {
+			return nil
+		}
+		return channel.commands
+	})
+	timers.RegisterRoutes(srv, func(response http.ResponseWriter, request *http.Request) *timers.Service {
+		channel, _ := channelChats.resolve(response, request)
+		if channel == nil {
+			return nil
+		}
+		return channel.timers
+	})
 	go timersService.Run(ctx.Done())
 
 	moderationService := moderation.New(chatRuntime, chatRuntime)
-	moderation.RegisterRoutes(srv, moderationService)
-
-	clips.RegisterRoutes(srv, chatRuntime)
 
 	// Фаза 2: баллы, игры, цитаты, channel points, опросы.
 	pointsService := points.New(chatRuntime, musicDB)
 	pointsService.SetTriggers(triggersService)
-	points.RegisterRoutes(srv, pointsService)
 
 	gamesService := games.New(pointsService, chatRuntime)
 	gamesService.SetTriggers(triggersService)
-	games.RegisterRoutes(srv, gamesService)
 
 	quotesService := quotes.New(chatRuntime, musicDB)
 	quotesService.SetTriggers(triggersService)
-	quotes.RegisterRoutes(srv, quotesService)
+	primaryChat.moderation = moderationService
+	primaryChat.points = pointsService
+	primaryChat.games = gamesService
+	primaryChat.quotes = quotesService
 
 	actioner := commandActioner{points: pointsService, games: gamesService, chat: chatRuntime, music: musicService, quotes: quotesService, sync: syncService, commands: commandsService, widgets: widgetsService, alerts: alertsService, roulette: rouletteService}
 	commandsService.SetActioner(actioner)
-	diceFormula := func(value string, message twitch.TwitchChatMessage) string {
-		raw := strings.ToLower(strings.TrimSpace(value))
-		if fields := strings.Fields(message.Text); len(fields) > 1 {
-			raw = strings.ToLower(strings.TrimSpace(fields[1]))
-		}
-		count, sides := 1, 6
-		if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err != nil {
-			if _, err := fmt.Sscanf(raw, "d%d", &sides); err != nil {
-				return "1d6"
-			}
-		}
-		if count < 1 || count > 20 || sides < 1 || sides > 1000 {
-			return "1d6"
-		}
-		return raw
-	}
-	diceFormulaBound := func(value string, message twitch.TwitchChatMessage) string {
-		raw := strings.ToLower(strings.TrimSpace(value))
-		count, sides := 1, 6
-		if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err == nil && count >= 1 && count <= 20 && sides >= 1 && sides <= 1000 {
-			return raw
-		}
-		if _, err := fmt.Sscanf(raw, "d%d", &sides); err == nil && sides >= 1 && sides <= 1000 {
-			return raw
-		}
-
-		return diceFormula(value, message)
-	}
-	rollDiceFormula := func(formula string) int {
-		count, sides := 1, 6
-		if _, err := fmt.Sscanf(formula, "%dd%d", &count, &sides); err != nil {
-			if _, err := fmt.Sscanf(formula, "d%d", &sides); err != nil {
-				count, sides = 1, 6
-			}
-		}
-		total := 0
-		for i := 0; i < count; i++ {
-			total += rand.Intn(sides) + 1
-		}
-		return total
-	}
-	commandsService.SetVariableResolver(func(name, value string, message twitch.TwitchChatMessage) string {
-		switch name {
-		case "lastmusic", "lasttrack", "np", "now":
-			track := musicService.Current()
-			if track == nil {
-				if tracks := musicService.List(); len(tracks) > 0 {
-					track = &tracks[0]
-				}
-			}
-			if track != nil {
-				return track.URL
-			}
-		case "date":
-			return time.Now().Format("02.01.2006")
-		case "time":
-			return time.Now().Format("15:04")
-		case "datetime":
-			return time.Now().Format("02.01.2006 15:04")
-		case "timestamp":
-			return strconv.FormatInt(time.Now().Unix(), 10)
-		case "random.number":
-			minimum, maximum, ok := parseRange(value)
-			if !ok {
-				return strconv.Itoa(rand.Intn(100) + 1)
-			}
-			return strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
-		case "random":
-			if minimum, maximum, ok := parseRange(value); ok {
-				return strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
-			}
-			options := strings.Split(value, "|")
-			clean := options[:0]
-			for _, item := range options {
-				if item = strings.TrimSpace(item); item != "" {
-					clean = append(clean, item)
-				}
-			}
-			if len(clean) > 0 {
-				return clean[rand.Intn(len(clean))]
-			}
-			return strconv.Itoa(rand.Intn(100) + 1)
-		case "dice.name", "dicename":
-			return diceFormula(value, message)
-		case "dice.result", "number":
-			formula := diceFormulaBound(value, message)
-			if state := syncService.GetDice(); state.Formula == formula && time.Since(state.RolledAt) < 5*time.Second {
-				return strconv.Itoa(state.Result)
-			}
-
-			return strconv.Itoa(rollDiceFormula(formula))
-		case "dice":
-			return strconv.Itoa(rollDiceFormula(diceFormulaBound(value, message)))
-		case "coinflip":
-			if rand.Intn(2) == 0 {
-				return "орёл"
-			}
-			return "решка"
-		case "points.balance":
-			return pointsService.BalanceText(message)
-		case "points.top":
-			return pointsService.TopText()
-		case "points.shop":
-			return pointsService.ShopText()
-		case "roulette.last":
-			if round, ok := rouletteService.Last(); ok {
-				return round.Game.Title
-			}
-
-			return ""
-		case "widget.enabled":
-			if widgetsService.Get()[strings.TrimSpace(value)] {
-				return "включён"
-			}
-			return "выключен"
-		case "twitch.followage", "twitch.accountage", "twitch.uptime", "twitch.viewers", "twitch.title", "twitch.game", "twitch.followers", "twitch.subscribers", "twitch.chatters":
-			value := actioner.Twitch(context.Background(), name, message.Author.ID)
-			value = strings.TrimPrefix(value, "Фолловер с ")
-			value = strings.TrimPrefix(value, "Аккаунт создан ")
-
-			return value
-		}
-
-		return ""
-	})
+	commandsService.SetVariableResolver(actioner.variableResolver())
 
 	redemptionsService := redemptions.New(pointsService, chatRuntime, musicDB)
 	redemptionsService.SetWheelEntry(gamesService.EnterWheelWithCost)
 	redemptionsService.SetRewards(chatRuntime)
 	redemptionsService.SetCommandRunner(commandsService)
-	redemptions.RegisterRoutes(srv, redemptionsService)
 
 	pollsService := polls.New(chatRuntime)
-	polls.RegisterRoutes(srv, pollsService)
 
 	analyticsService := analytics.New(chatRuntime)
-	analytics.RegisterRoutes(srv, analyticsService)
 	go analyticsService.Run(ctx)
 
 	streamService := stream.New(chatRuntime)
-	stream.RegisterRoutes(srv, streamService)
+	primaryChat.redemptions = redemptionsService
+	primaryChat.polls = pollsService
+	primaryChat.analytics = analyticsService
+	primaryChat.stream = streamService
+	channelChats.registerEngagementRoutes(srv)
 
 	metricsService := metrics.New(analyticsService, donationsService.Bus(), pointsService, musicService)
 	metricsService.SetTelegramSender(notifyService.SendTelegramText)
-	metrics.RegisterRoutes(srv, metricsService)
+	metrics.RegisterRoutes(primaryRoutes, metricsService)
 
 	registryActions := actions.New()
-	actions.RegisterRoutes(srv, registryActions)
+	actions.RegisterRoutes(primaryRoutes, registryActions)
 
 	// Хуки вовлечения и уведомлений.
 	viewerRuntime.SetOnTick(func(viewers []viewer.Viewer) {
@@ -654,14 +604,13 @@ func main() {
 	})
 
 	chatRuntime.SetOnConnected(func(user twitch.ChatUser) {
+		if err := timersService.UseStorage(musicDB, user.ID); err != nil {
+			log.Printf("[Timers] load for %s failed: %v", user.ID, err)
+		}
 		timersService.SetChannel(user.Login)
 		sevenTVService.SetChannel(user.ID)
 		pointsService.SetChannel(user.ID)
 	})
-
-	if err := chatRuntime.Start(ctx); err != nil {
-		log.Printf("[Chat] runtime start failed: %v", err)
-	}
 
 	if telegramPollingActive() {
 		go notifyService.TelegramBotLoop(ctx, func() string {
@@ -681,7 +630,7 @@ func main() {
 
 	// Конвейер чата: активность таймеров, команды, модерация, баллы, игры.
 	chatService.Subscribe(func(message twitch.TwitchChatMessage) {
-		if chatRuntime.IsOwnText(message.Text) {
+		if message.Author.ID == message.Broadcaster.ID && chatRuntime.IsOwnText(message.Text) {
 			return
 		}
 
@@ -769,6 +718,12 @@ func main() {
 		go quotesService.HandleMessage(message)
 	})
 
+	if err := chatRuntime.Start(ctx); err != nil {
+		log.Printf("[Chat] runtime start failed: %v", err)
+	}
+	close(channelChats.ready)
+	go channelChats.restore()
+
 	srv.ServeEndpoint("/rgg-sync/twitch/reconnect", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
@@ -776,7 +731,11 @@ func main() {
 			return
 		}
 
-		if err := chatRuntime.Reconnect(request.Context()); err != nil {
+		channel, _ := channelChats.resolve(response, request)
+		if channel == nil {
+			return
+		}
+		if err := channel.runtime.Reconnect(request.Context()); err != nil {
 			http.Error(response, err.Error(), http.StatusBadGateway)
 
 			return
@@ -787,7 +746,11 @@ func main() {
 	})
 
 	srv.ServeEndpoint("/rgg-sync/chat/badges", func(response http.ResponseWriter, request *http.Request) {
-		badges, err := chatRuntime.ChatBadges(request.Context())
+		channel, _ := channelChats.resolveWidgetRead(response, request)
+		if channel == nil {
+			return
+		}
+		badges, err := channel.runtime.ChatBadges(request.Context())
 		if err != nil {
 			http.Error(response, err.Error(), http.StatusBadGateway)
 
@@ -819,7 +782,10 @@ func main() {
 	registry.Register(sevenTVService)
 	registry.Register(triggersService)
 	registry.Register(metricsService)
-	integrations.RegisterRoutes(srv, registry)
+	primaryChat.registry = registry
+	integrations.RegisterRoutes(srv, channelRoute(channelChats, func(channel *connectedChat) *integrations.Registry {
+		return channel.registry
+	}))
 
 	<-ctx.Done()
 
@@ -902,6 +868,137 @@ type commandActioner struct {
 	roulette *roulette.Service
 }
 
+func (a commandActioner) variableResolver() commands.VariableResolver {
+	diceFormula := func(value string, message twitch.TwitchChatMessage) string {
+		raw := strings.ToLower(strings.TrimSpace(value))
+		if fields := strings.Fields(message.Text); len(fields) > 1 {
+			raw = strings.ToLower(strings.TrimSpace(fields[1]))
+		}
+		count, sides := 1, 6
+		if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err != nil {
+			if _, err := fmt.Sscanf(raw, "d%d", &sides); err != nil {
+				return "1d6"
+			}
+		}
+		if count < 1 || count > 20 || sides < 1 || sides > 1000 {
+			return "1d6"
+		}
+		return raw
+	}
+	diceFormulaBound := func(value string, message twitch.TwitchChatMessage) string {
+		raw := strings.ToLower(strings.TrimSpace(value))
+		count, sides := 1, 6
+		if _, err := fmt.Sscanf(raw, "%dd%d", &count, &sides); err == nil && count >= 1 && count <= 20 && sides >= 1 && sides <= 1000 {
+			return raw
+		}
+		if _, err := fmt.Sscanf(raw, "d%d", &sides); err == nil && sides >= 1 && sides <= 1000 {
+			return raw
+		}
+
+		return diceFormula(value, message)
+	}
+	rollDiceFormula := func(formula string) int {
+		count, sides := 1, 6
+		if _, err := fmt.Sscanf(formula, "%dd%d", &count, &sides); err != nil {
+			if _, err := fmt.Sscanf(formula, "d%d", &sides); err != nil {
+				count, sides = 1, 6
+			}
+		}
+		total := 0
+		for i := 0; i < count; i++ {
+			total += rand.Intn(sides) + 1
+		}
+		return total
+	}
+	return func(name, value string, message twitch.TwitchChatMessage) string {
+		switch name {
+		case "lastmusic", "lasttrack", "np", "now":
+			track := a.music.Current()
+			if track == nil {
+				if tracks := a.music.List(); len(tracks) > 0 {
+					track = &tracks[0]
+				}
+			}
+			if track != nil {
+				return track.URL
+			}
+		case "date":
+			return time.Now().Format("02.01.2006")
+		case "time":
+			return time.Now().Format("15:04")
+		case "datetime":
+			return time.Now().Format("02.01.2006 15:04")
+		case "timestamp":
+			return strconv.FormatInt(time.Now().Unix(), 10)
+		case "random.number":
+			minimum, maximum, ok := parseRange(value)
+			if !ok {
+				return strconv.Itoa(rand.Intn(100) + 1)
+			}
+			return strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
+		case "random":
+			if minimum, maximum, ok := parseRange(value); ok {
+				return strconv.Itoa(minimum + rand.Intn(maximum-minimum+1))
+			}
+			options := strings.Split(value, "|")
+			clean := options[:0]
+			for _, item := range options {
+				if item = strings.TrimSpace(item); item != "" {
+					clean = append(clean, item)
+				}
+			}
+			if len(clean) > 0 {
+				return clean[rand.Intn(len(clean))]
+			}
+			return strconv.Itoa(rand.Intn(100) + 1)
+		case "dice.name", "dicename":
+			return diceFormula(value, message)
+		case "dice.result", "number":
+			formula := diceFormulaBound(value, message)
+			if state := a.sync.GetDice(); state.Formula == formula && time.Since(state.RolledAt) < 5*time.Second {
+				return strconv.Itoa(state.Result)
+			}
+
+			return strconv.Itoa(rollDiceFormula(formula))
+		case "dice":
+			return strconv.Itoa(rollDiceFormula(diceFormulaBound(value, message)))
+		case "coinflip":
+			if rand.Intn(2) == 0 {
+				return "орёл"
+			}
+			return "решка"
+		case "points.balance":
+			return a.points.BalanceText(message)
+		case "points.top":
+			return a.points.TopText()
+		case "points.shop":
+			return a.points.ShopText()
+		case "roulette.last":
+			if a.roulette == nil {
+				return ""
+			}
+			if round, ok := a.roulette.Last(); ok {
+				return round.Game.Title
+			}
+
+			return ""
+		case "widget.enabled":
+			if a.widgets.Get()[strings.TrimSpace(value)] {
+				return "включён"
+			}
+			return "выключен"
+		case "twitch.followage", "twitch.accountage", "twitch.uptime", "twitch.viewers", "twitch.title", "twitch.game", "twitch.followers", "twitch.subscribers", "twitch.chatters":
+			value := a.Twitch(context.Background(), name, message.Author.ID)
+			value = strings.TrimPrefix(value, "Фолловер с ")
+			value = strings.TrimPrefix(value, "Аккаунт создан ")
+
+			return value
+		}
+
+		return ""
+	}
+}
+
 func (a commandActioner) AwardPoints(userID, login, displayName string, amount int, reason string) error {
 	a.points.Add(userID, login, displayName, amount, reason)
 
@@ -917,6 +1014,9 @@ func (a commandActioner) WheelEntry(userID, login, displayName, title string, be
 }
 
 func (a commandActioner) AddMusic(ctx context.Context, url, addedBy string) error {
+	if a.music == nil {
+		return fmt.Errorf("music is unavailable for this channel")
+	}
 	if videoID, ok := music.ExtractVideoID(url); ok {
 		_, err := a.music.Add(ctx, videoID, "https://www.youtube.com/watch?v="+videoID, addedBy)
 
@@ -942,6 +1042,9 @@ func (a commandActioner) Twitch(ctx context.Context, action, userID string) stri
 	case "twitch.accountage":
 		value, err := a.chat.AccountCreatedAt(ctx, userID)
 		if err == nil {
+			if age, ageErr := twitchAccountAge(value, time.Now()); ageErr == nil {
+				return "Аккаунту " + age
+			}
 			return "Аккаунт создан " + value
 		}
 	case "twitch.uptime":
@@ -1007,6 +1110,74 @@ func parseRange(raw string) (int, int, bool) {
 	}
 
 	return minimum, maximum, true
+}
+
+func twitchAccountAge(createdAt string, now time.Time) (string, error) {
+	created, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return "", err
+	}
+	created = created.UTC()
+	now = now.UTC()
+	if created.After(now) {
+		return "", fmt.Errorf("account creation time is in the future")
+	}
+	addClamped := func(date time.Time, years, months int) time.Time {
+		monthIndex := date.Year()*12 + int(date.Month()) - 1 + years*12 + months
+		year, monthIndex := monthIndex/12, monthIndex%12
+		if monthIndex < 0 {
+			year--
+			monthIndex += 12
+		}
+		month := time.Month(monthIndex + 1)
+		lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+		day := date.Day()
+		if day > lastDay {
+			day = lastDay
+		}
+		return time.Date(year, month, day, date.Hour(), date.Minute(), date.Second(), date.Nanosecond(), time.UTC)
+	}
+	years := now.Year() - created.Year()
+	if addClamped(created, years, 0).After(now) {
+		years--
+	}
+	monthBase := addClamped(created, years, 0)
+	months := (now.Year()-monthBase.Year())*12 + int(now.Month()-monthBase.Month())
+	if addClamped(monthBase, 0, months).After(now) {
+		months--
+	}
+	dayBase := addClamped(monthBase, 0, months)
+	days := int(now.Sub(dayBase) / (24 * time.Hour))
+
+	parts := make([]string, 0, 3)
+	if years > 0 {
+		parts = append(parts, fmt.Sprintf("%d %s", years, russianAgeUnit(years, "год", "года", "лет")))
+	}
+	if months > 0 {
+		parts = append(parts, fmt.Sprintf("%d %s", months, russianAgeUnit(months, "месяц", "месяца", "месяцев")))
+	}
+	if days > 0 || len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%d %s", days, russianAgeUnit(days, "день", "дня", "дней")))
+	}
+	if len(parts) == 1 {
+		return parts[0], nil
+	}
+	return strings.Join(parts[:len(parts)-1], ", ") + " и " + parts[len(parts)-1], nil
+}
+
+func russianAgeUnit(value int, one, few, many string) string {
+	lastDigit, lastTwo := value%10, value%100
+	if lastTwo >= 11 && lastTwo <= 14 {
+		return many
+	}
+	switch lastDigit {
+	case 1:
+		return one
+	case 2, 3, 4:
+		return few
+	default:
+		return many
+	}
 }
 
 func (a commandActioner) resolveTarget(ctx context.Context, message twitch.TwitchChatMessage, value string) (string, string, error) {
@@ -1200,6 +1371,9 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 	case "games.accept":
 		return a.games.AcceptDuel(message), nil, true
 	case "lastmusic":
+		if a.music == nil {
+			return "", fmt.Errorf("music is unavailable for this channel"), true
+		}
 		track := a.music.Current()
 		if track == nil {
 			return "сейчас ничего не играет", nil, true
@@ -1212,6 +1386,9 @@ func (a commandActioner) Perform(ctx context.Context, action, value string, mess
 		}
 		return "", a.chat.TimeoutUser(ctx, message.Author.ID, seconds, "command"), true
 	case "music.current":
+		if a.music == nil {
+			return "", fmt.Errorf("music is unavailable for this channel"), true
+		}
 		track := a.music.Current()
 		if track == nil {
 			return "сейчас ничего не играет", nil, true

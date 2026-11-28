@@ -11,6 +11,8 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/p7x-dev/nameless-streamhata-backend/access"
+	data_base "github.com/p7x-dev/nameless-streamhata-backend/data-base"
+	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 )
 
 type Deps interface {
@@ -359,9 +361,24 @@ func (s *Service) user(request *http.Request) (string, string) {
 	if s.db == nil {
 		return "", ""
 	}
+	if id, present, err := twitch.BrowserSessionUserID(s.db, request); present {
+		if err != nil {
+			return "", ""
+		}
+		var login, display string
+		if err := s.db.QueryRowContext(request.Context(), `SELECT username, COALESCE(NULLIF(display_name, ''), username)
+			FROM users WHERE id = $1 AND banned = false`, id).Scan(&login, &display); err != nil {
+			return "", ""
+		}
+		return login, display
+	}
 
 	cookie, err := request.Cookie("e-hub-refresh-token")
 	if err != nil || cookie.Value == "" {
+		return "", ""
+	}
+	digest, err := data_base.RefreshTokenDigest(cookie.Value)
+	if err != nil {
 		return "", ""
 	}
 
@@ -371,9 +388,9 @@ func (s *Service) user(request *http.Request) (string, string) {
 		request.Context(),
 		`SELECT u.username, COALESCE(NULLIF(u.display_name, ''), u.username)
 		   FROM tokens t JOIN users u ON u.id = t.user_id
-		  WHERE t.refresh_token = $1 AND u.banned = false
+		  WHERE t.refresh_token_hash = $1 AND u.banned = false
 		  LIMIT 1`,
-		cookie.Value,
+		digest,
 	).Scan(&login, &displayName)
 	if err != nil {
 		return "", ""

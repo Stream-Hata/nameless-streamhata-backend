@@ -63,6 +63,7 @@ func New(db *sql.DB, accessService *access.Service, securityService *security.Se
 func (s *Service) RegisterRoutes(srv Deps) {
 	srv.ServeEndpoint("/rgg-sync/blog", s.publicList)
 	srv.ServeEndpoint("/rgg-sync/blog/upload", s.upload)
+	srv.ServeEndpoint("/rgg-sync/blog/link-preview", s.linkPreview)
 	srv.ServeEndpoint("/rgg-sync/blog/admin", s.adminList)
 	srv.ServeEndpoint("/rgg-sync/blog/admin/{id}", s.adminArticle)
 	srv.ServeEndpoint("/rgg-sync/blog/{slug}", s.publicArticle)

@@ -18,10 +18,12 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	data_base "github.com/p7x-dev/nameless-streamhata-backend/data-base"
 	"github.com/p7x-dev/nameless-streamhata-backend/media"
 	"github.com/p7x-dev/nameless-streamhata-backend/mods"
 	"github.com/p7x-dev/nameless-streamhata-backend/security"
 	"github.com/p7x-dev/nameless-streamhata-backend/spamguard"
+	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 )
 
 type Deps interface {
@@ -1097,14 +1099,27 @@ func (s *Service) relationship(response http.ResponseWriter, request *http.Reque
 }
 
 func (s *Service) user(request *http.Request) (int64, string, string, bool) {
+	if id, present, err := twitch.BrowserSessionUserID(s.db, request); present {
+		if err != nil {
+			return 0, "", "", false
+		}
+		var login, display string
+		err = s.db.QueryRowContext(request.Context(), `SELECT username, COALESCE(NULLIF(display_name, ''), username)
+			FROM users WHERE id = $1 AND banned = false`, id).Scan(&login, &display)
+		return int64(id), login, display, err == nil
+	}
 	cookie, err := request.Cookie("e-hub-refresh-token")
 	if err != nil || cookie.Value == "" {
+		return 0, "", "", false
+	}
+	digest, err := data_base.RefreshTokenDigest(cookie.Value)
+	if err != nil {
 		return 0, "", "", false
 	}
 	var id int64
 	var login, display string
 	err = s.db.QueryRowContext(request.Context(), `SELECT u.id,u.username,COALESCE(NULLIF(u.display_name,''),u.username)
-		FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.refresh_token=$1 AND u.banned=false LIMIT 1`, cookie.Value).
+		FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.refresh_token_hash=$1 AND u.banned=false LIMIT 1`, digest).
 		Scan(&id, &login, &display)
 	return id, login, display, err == nil
 }

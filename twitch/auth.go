@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,7 +33,7 @@ func SendRequest[T any](url string, ctx context.Context, method, token string) (
 		return nil, err
 	}
 
-	resp, err := netcfg.NewHTTPClient(20 * time.Second).Do(req)
+	resp, err := netcfg.NewDirectHTTPClient(20 * time.Second).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -67,6 +68,41 @@ func envAny(keys ...string) string {
 
 var Env = map[string]string{}
 
+type oauthSetupFlow struct {
+	handler func(http.ResponseWriter, string, string)
+	expires time.Time
+}
+
+var pendingOAuthSetup = struct {
+	sync.Mutex
+	flows map[string]oauthSetupFlow
+}{flows: make(map[string]oauthSetupFlow)}
+
+// RegisterOAuthSetupFlow binds one Twitch OAuth state to a short-lived callback
+// that does not rely on browser cookies.
+func RegisterOAuthSetupFlow(state string, handler func(http.ResponseWriter, string, string)) {
+	pendingOAuthSetup.Lock()
+	defer pendingOAuthSetup.Unlock()
+	now := time.Now()
+	for key, flow := range pendingOAuthSetup.flows {
+		if now.After(flow.expires) {
+			delete(pendingOAuthSetup.flows, key)
+		}
+	}
+	pendingOAuthSetup.flows[state] = oauthSetupFlow{handler: handler, expires: now.Add(5 * time.Minute)}
+}
+
+func takeOAuthSetupFlow(state string) func(http.ResponseWriter, string, string) {
+	pendingOAuthSetup.Lock()
+	defer pendingOAuthSetup.Unlock()
+	flow, ok := pendingOAuthSetup.flows[state]
+	delete(pendingOAuthSetup.flows, state)
+	if !ok || time.Now().After(flow.expires) {
+		return nil
+	}
+	return flow.handler
+}
+
 // ReloadEnv обновляет настройки после загрузки секретов из credentials/OpenBao.
 func ReloadEnv() {
 	Env = map[string]string{
@@ -77,7 +113,7 @@ func ReloadEnv() {
 	}
 }
 
-func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.User], tokenRepo data_base.Database[data_base.Token]) {
+func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.User], tokenRepo data_base.Database[data_base.Token], sessions *Sessions) {
 	type cachedValidation struct {
 		response ValidationResponse
 		expires  time.Time
@@ -177,20 +213,21 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 	srv.ServeEndpoint("/twitch/callback", func(w http.ResponseWriter, r *http.Request) {
 		req := r.URL.Query()
 		state, code := req.Get("state"), req.Get("code")
+		setupHandler := takeOAuthSetupFlow(state)
 		cookies := r.CookiesNamed("e-hub-state")
 
-		if len(cookies) == 0 || code == "" {
+		if code == "" || (setupHandler == nil && len(cookies) == 0) {
 			http.Error(w, "Invalid OAuth", http.StatusBadRequest)
 
 			return
 		}
 
-		savedState := cookies[0].Value
-
-		if savedState == "" || savedState != state {
-			http.Error(w, "Invalid OAuth", http.StatusBadRequest)
-
-			return
+		if setupHandler == nil {
+			savedState := cookies[0].Value
+			if savedState == "" || savedState != state {
+				http.Error(w, "Invalid OAuth", http.StatusBadRequest)
+				return
+			}
 		}
 
 		params := buildParams("authorization_code")
@@ -206,7 +243,7 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 		tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		tokenReq.Header.Set("Accept", "application/json")
 
-		tokenResp, err := netcfg.NewHTTPClient(20 * time.Second).Do(tokenReq)
+		tokenResp, err := netcfg.NewDirectHTTPClient(20 * time.Second).Do(tokenReq)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -237,27 +274,29 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 			return
 		}
 
-		http.SetCookie(w, &http.Cookie{
-			Name:     "e-hub-refresh-token",
-			Value:    tokenData.RefreshToken,
-			Path:     "/",
-			Domain:   cookieDomain(),
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   30 * 24 * 60 * 60,
-			Expires:  time.Now().Add(30 * 24 * time.Hour),
-			Secure:   os.Getenv("IS_PROD") == "1",
-			HttpOnly: true,
-		})
+		if setupHandler == nil {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "e-hub-refresh-token",
+				Value:    tokenData.RefreshToken,
+				Path:     "/",
+				Domain:   cookieDomain(),
+				SameSite: http.SameSiteLaxMode,
+				MaxAge:   30 * 24 * 60 * 60,
+				Expires:  time.Now().Add(30 * 24 * time.Hour),
+				Secure:   os.Getenv("IS_PROD") == "1",
+				HttpOnly: true,
+			})
 
-		http.SetCookie(w, &http.Cookie{
-			Name:     "e-hub-login-event",
-			Value:    "1",
-			Path:     "/",
-			Domain:   cookieDomain(),
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   120,
-			Secure:   os.Getenv("IS_PROD") == "1",
-		})
+			http.SetCookie(w, &http.Cookie{
+				Name:     "e-hub-login-event",
+				Value:    "1",
+				Path:     "/",
+				Domain:   cookieDomain(),
+				SameSite: http.SameSiteLaxMode,
+				MaxAge:   120,
+				Secure:   os.Getenv("IS_PROD") == "1",
+			})
+		}
 
 		var users TwitchUserResponse
 
@@ -271,7 +310,7 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 		userRequest.Header.Set("Authorization", "Bearer "+tokenData.AccessToken)
 		userRequest.Header.Set("Client-Id", Env["TwitchClientKey"])
 
-		userResponse, err := netcfg.NewHTTPClient(20 * time.Second).Do(userRequest)
+		userResponse, err := netcfg.NewDirectHTTPClient(20 * time.Second).Do(userRequest)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 
@@ -300,6 +339,10 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 		}
 
 		user := users.Data[0]
+		if setupHandler != nil {
+			setupHandler(w, user.Login, user.ID)
+			return
+		}
 
 		findUser, err := userRepository.Find(data_base.Where{
 			Column: "username",
@@ -372,6 +415,10 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 		if _, err = userRepository.Update(*userRecord); err != nil {
 			http.Error(w, "Twitch user update failed: "+err.Error(), http.StatusBadGateway)
 
+			return
+		}
+		if err := sessions.Issue(w, r, userRecord.ID); err != nil {
+			http.Error(w, "Twitch session creation failed", http.StatusInternalServerError)
 			return
 		}
 
@@ -531,129 +578,100 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 	})
 
 	validateTokenHandler := func(w http.ResponseWriter, r *http.Request) {
-		refreshCookie, err := r.Cookie("e-hub-refresh-token")
-		if err != nil || refreshCookie.Value == "" {
+		w.Header().Set("Cache-Control", "private, no-store")
+		user, token, err := sessions.Account(r)
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, http.ErrNoCookie) {
 			writeValidation(w, ValidationResponse{Valid: false})
-
+			return
+		}
+		if err != nil {
+			http.Error(w, "Twitch session temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
+		cacheKey := strconv.Itoa(user.ID)
 		validationCache.Lock()
-		cached, cachedOK := validationCache.items[refreshCookie.Value]
+		cached, cachedOK := validationCache.items[cacheKey]
 		validationCache.Unlock()
-
 		if cachedOK && time.Now().Before(cached.expires) {
 			writeValidation(w, cached.response)
-
 			return
 		}
 
-		findToken, err := tokenRepo.Find(data_base.Where{
-			Column: "refresh_token",
-			Value:  refreshCookie.Value,
-		})
-		if err != nil || findToken == nil {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			_ = json.NewEncoder(w).Encode(ValidationResponse{Valid: false})
-
-			return
-		}
-
-		dbUser, err := userRepository.Find(data_base.Where{
-			Column: "id",
-			Value:  findToken.UserID,
-		})
-		if err != nil || dbUser == nil || dbUser.Banned {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			_ = json.NewEncoder(w).Encode(ValidationResponse{Valid: false})
-
-			return
-		}
-
-		params := url.Values{}
-		params.Set("client_id", Env["TwitchClientKey"])
-		params.Set("client_secret", Env["TwitchClientSecret"])
-		params.Set("grant_type", "refresh_token")
-		params.Set("refresh_token", refreshCookie.Value)
-
-		tokenReq, err := http.NewRequestWithContext(
-			r.Context(),
-			http.MethodPost,
-			twitchTokenURL(),
-			strings.NewReader(params.Encode()),
-		)
+		twitchID := strconv.FormatInt(user.TwitchUserID, 10)
+		statsCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		tokenValid, err := ValidateOAuthToken(statsCtx, token.AccessToken, twitchID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-
+			http.Error(w, "Twitch authorization temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
-
-		tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-		response, err := netcfg.NewHTTPClient(20 * time.Second).Do(tokenReq)
-		if err != nil || response == nil || response.StatusCode != http.StatusOK {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			_ = json.NewEncoder(w).Encode(ValidationResponse{Valid: false})
-
-			return
+		if !tokenValid {
+			refreshed, refreshErr := refreshOAuthToken(statsCtx, token, tokenRepo)
+			if refreshErr != nil {
+				http.Error(w, "Twitch authorization temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if refreshed {
+				if _, legacyCookieErr := r.Cookie("e-hub-refresh-token"); legacyCookieErr == nil {
+					http.SetCookie(w, &http.Cookie{
+						Name: "e-hub-refresh-token", Value: token.RefreshToken, Path: "/", Domain: cookieDomain(),
+						HttpOnly: true, Secure: os.Getenv("IS_PROD") == "1", SameSite: http.SameSiteLaxMode,
+						MaxAge: int(sessionLifetime / time.Second), Expires: time.Now().Add(sessionLifetime),
+					})
+				}
+				tokenValid, err = ValidateOAuthToken(statsCtx, token.AccessToken, twitchID)
+				if err != nil {
+					http.Error(w, "Twitch authorization temporarily unavailable", http.StatusServiceUnavailable)
+					return
+				}
+			}
 		}
-
-		defer func() {
-			_ = response.Body.Close()
-		}()
-
-		var data TwitchOauthREsponse
-		if err := json.NewDecoder(response.Body).Decode(&data); err != nil || data.AccessToken == "" {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			_ = json.NewEncoder(w).Encode(ValidationResponse{Valid: false})
-
-			return
-		}
-
-		findToken.AccessToken = data.AccessToken
-		if data.RefreshToken != "" {
-			findToken.RefreshToken = data.RefreshToken
-		}
-		if _, err := tokenRepo.Update(*findToken); err == nil {
+		if !tokenValid {
+			_ = sessions.revoke(w, r)
 			http.SetCookie(w, &http.Cookie{
-				Name:     "e-hub-refresh-token",
-				Value:    data.RefreshToken,
-				Path:     "/",
-				Domain:   cookieDomain(),
-				Secure:   os.Getenv("IS_PROD") == "1",
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
-				MaxAge:   30 * 24 * 60 * 60,
-				Expires:  time.Now().Add(30 * 24 * time.Hour),
+				Name: "e-hub-refresh-token", Value: "", Path: "/", Domain: cookieDomain(),
+				HttpOnly: true, Secure: os.Getenv("IS_PROD") == "1", SameSite: http.SameSiteLaxMode,
+				MaxAge: -1, Expires: time.Unix(1, 0),
 			})
+			writeValidation(w, ValidationResponse{Valid: false})
+			return
 		}
 
-		stats, stream := loadTwitchState(r.Context(), data.AccessToken, strconv.FormatInt(dbUser.TwitchUserID, 10))
+		cookie, err := r.Cookie(sessionCookie)
+		if errors.Is(err, http.ErrNoCookie) {
+			// Upgrade an existing valid login before issuing a browser session.
+			if err := sessions.Issue(w, r, user.ID); err != nil {
+				http.Error(w, "Twitch session temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		} else if err := sessions.renewBrowser(w, r, cookie.Value); err != nil {
+			http.Error(w, "Twitch session temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 
-		validation := ValidationResponse{
+		stats, stream := loadTwitchState(statsCtx, token.AccessToken, twitchID)
+		result := ValidationResponse{
 			Valid: true,
-			User: User{
-				ID:           strconv.Itoa(dbUser.ID),
-				DisplayName:  dbUser.DisplayName,
-				Username:     dbUser.Username,
-				TwitchUserID: strconv.FormatInt(dbUser.TwitchUserID, 10),
-				Avatar:       dbUser.Avatar,
-			},
-			Stats:  stats,
-			Stream: stream,
+			User: User{ID: strconv.Itoa(user.ID), Username: user.Username, DisplayName: user.DisplayName,
+				TwitchUserID: twitchID, Avatar: user.Avatar},
+			Stats: stats, Stream: stream,
 		}
-
 		validationCache.Lock()
-		validationCache.items[refreshCookie.Value] = cachedValidation{response: validation, expires: time.Now().Add(30 * time.Second)}
+		for key, item := range validationCache.items {
+			if time.Now().After(item.expires) {
+				delete(validationCache.items, key)
+			}
+		}
+		validationCache.items[cacheKey] = cachedValidation{response: result, expires: time.Now().Add(30 * time.Second)}
 		validationCache.Unlock()
-		writeValidation(w, validation)
+		writeValidation(w, result)
 	}
 
 	srv.ServeEndpoint("/rgg-sync/twitch/logout", func(w http.ResponseWriter, r *http.Request) {
-		if cookie, err := r.Cookie("e-hub-refresh-token"); err == nil {
-			validationCache.Lock()
-			delete(validationCache.items, cookie.Value)
-			validationCache.Unlock()
+		if err := sessions.revoke(w, r); err != nil {
+			http.Error(w, "Twitch logout failed", http.StatusInternalServerError)
+			return
 		}
 
 		http.SetCookie(w, &http.Cookie{
@@ -676,19 +694,87 @@ func TwitchAuth(srv server.Server, userRepository data_base.Database[data_base.U
 
 	// Фронтовая панель зовёт /rgg-sync/twitch: если refresh-cookie нет —
 	// отвечаем JSON-статусом "не авторизован", иначе валидируем как обычно.
-	srv.ServeEndpoint("/rgg-sync/twitch", func(w http.ResponseWriter, r *http.Request) {
-		if _, err := r.Cookie("e-hub-refresh-token"); err != nil {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	srv.ServeEndpoint("/rgg-sync/twitch", validateTokenHandler)
+}
 
-			if err := json.NewEncoder(w).Encode(ValidationResponse{Valid: false}); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-			}
+type oauthTokenValidation struct {
+	ClientID string `json:"client_id"`
+	UserID   string `json:"user_id"`
+}
 
-			return
+// ValidateOAuthToken checks that Twitch still recognizes this user's grant.
+// A StreamHata browser session can outlive a grant revoked in Twitch settings.
+func ValidateOAuthToken(ctx context.Context, accessToken, expectedUserID string) (bool, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://id.twitch.tv/oauth2/validate", nil)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Authorization", "OAuth "+accessToken)
+
+	response, err := netcfg.NewDirectHTTPClient(3 * time.Second).Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode == http.StatusUnauthorized {
+		return false, nil
+	}
+	if response.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("Twitch token validation returned %d", response.StatusCode)
+	}
+
+	var validation oauthTokenValidation
+	if err := json.NewDecoder(response.Body).Decode(&validation); err != nil {
+		return false, err
+	}
+	return validation.ClientID == Env["TwitchClientKey"] && validation.UserID == expectedUserID, nil
+}
+
+func refreshOAuthToken(ctx context.Context, token *data_base.Token, tokenRepo data_base.Database[data_base.Token]) (bool, error) {
+	if token.RefreshToken == "" {
+		return false, nil
+	}
+	params := buildParams("refresh_token")
+	params.Set("refresh_token", token.RefreshToken)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, twitchTokenURL(), strings.NewReader(params.Encode()))
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	response, err := netcfg.NewDirectHTTPClient(3 * time.Second).Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusUnauthorized {
+		var failure struct {
+			Message string `json:"message"`
 		}
-
-		validateTokenHandler(w, r)
-	})
+		if err := json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&failure); err == nil &&
+			strings.EqualFold(strings.TrimSpace(failure.Message), "invalid refresh token") {
+			return false, nil
+		}
+	}
+	if response.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("Twitch token refresh returned %d", response.StatusCode)
+	}
+	var refreshed TwitchOauthREsponse
+	if err := json.NewDecoder(response.Body).Decode(&refreshed); err != nil {
+		return false, err
+	}
+	if refreshed.AccessToken == "" {
+		return false, errors.New("Twitch token refresh returned an empty access token")
+	}
+	token.AccessToken = refreshed.AccessToken
+	if refreshed.RefreshToken != "" {
+		token.RefreshToken = refreshed.RefreshToken
+	}
+	if _, err := tokenRepo.Update(*token); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func loadTwitchState(ctx context.Context, token string, broadcasterID string) (TwitchUserStats, TwitchStreamInfo) {

@@ -214,10 +214,6 @@ func (d *DonationAlerts) refreshTokens(ctx context.Context) error {
 func (d *DonationAlerts) requestTokens(ctx context.Context, form url.Values) error {
 	tokenURL := donationAlertsOAuth + "/token"
 
-	if grant := form.Get("grant_type"); grant != "" {
-		tokenURL += "?grant_type=" + url.QueryEscape(grant)
-	}
-
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,

@@ -1,6 +1,7 @@
 package feedback
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -42,9 +43,14 @@ func (f *fakeTokens) Find(data_base.Where) (*data_base.Token, error) {
 }
 
 func TestSessionUserRequiresRefreshCookie(t *testing.T) {
+	t.Setenv("TWITCH_TOKEN_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	digest, err := data_base.RefreshTokenDigest("refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
 	service := &Service{
 		users:  &fakeUsers{user: &data_base.User{ID: 1, Username: "viewer"}},
-		tokens: &fakeTokens{token: &data_base.Token{UserID: 1, RefreshToken: "refresh"}},
+		tokens: &fakeTokens{token: &data_base.Token{UserID: 1, RefreshTokenHash: digest}},
 	}
 
 	request := httptest.NewRequest("POST", "/rgg-sync/feedback", nil)

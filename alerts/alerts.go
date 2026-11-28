@@ -485,15 +485,22 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/alerts", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/alerts", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusOK, map[string]any{
 			"events":   service.Recent(30),
 			"settings": service.GetSettings(),
 		})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/alerts/settings", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/alerts/settings", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPatch && request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -511,7 +518,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, service.SetSettings(settings))
 	})
 
-	srv.ServeEndpoint("/rgg-sync/alerts/notify", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/alerts/notify", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -534,7 +541,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		_ = json.NewEncoder(response).Encode(event)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/alerts/test", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/alerts/test", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 

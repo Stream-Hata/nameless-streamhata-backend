@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,9 @@ type helixUsersResponse struct {
 type Runtime struct {
 	clientID     string
 	clientSecret string
+	chatOwners   []string
+	accountID    int
+	twitchID     string
 
 	users   data_base.Database[data_base.User]
 	tokens  data_base.Database[data_base.Token]
@@ -64,44 +68,74 @@ type Runtime struct {
 	sent           map[string]time.Time
 	onNotification func(subscriptionType string, raw json.RawMessage)
 
-	http *http.Client
+	http    *http.Client
+	replyDB *sql.DB
 
-	mu            sync.Mutex
-	ctx           context.Context
-	enabled       bool
-	status        string
-	clientsCancel context.CancelFunc
+	chatSlots chan struct{}
+
+	mu              sync.Mutex
+	connectMu       sync.Mutex
+	ctx             context.Context
+	enabled         bool
+	status          string
+	clientsCancel   context.CancelFunc
+	accountAgeCache map[string]accountAgeCacheEntry
+}
+
+type accountAgeCacheEntry struct {
+	createdAt string
+	expiresAt time.Time
+}
+
+func NewForAccount(
+	clientID, clientSecret string,
+	user data_base.User,
+	users data_base.Database[data_base.User],
+	tokens data_base.Database[data_base.Token],
+	history *chat.Service,
+	viewers *viewer.Runtime,
+	replyDB *sql.DB,
+) *Runtime {
+	runtime := New(clientID, clientSecret, nil, users, tokens, history, viewers, nil, replyDB)
+	runtime.accountID = user.ID
+	runtime.twitchID = strconv.FormatInt(user.TwitchUserID, 10)
+	return runtime
 }
 
 func New(
 	clientID string,
 	clientSecret string,
+	chatOwners []string,
 	users data_base.Database[data_base.User],
 	tokens data_base.Database[data_base.Token],
 	chatService *chat.Service,
 	viewers *viewer.Runtime,
 	alertsService *alerts.Service,
+	replyDB *sql.DB,
 ) *Runtime {
+
 	return &Runtime{
-		clientID:     clientID,
-		clientSecret: clientSecret,
-		users:        users,
-		tokens:       tokens,
-		chat:         chatService,
-		viewers:      viewers,
-		alerts:       alertsService,
-		http:         netcfg.NewHTTPClient(20 * time.Second),
-		enabled:      true,
-		status:       "ожидает запуска",
-		sent:         make(map[string]time.Time),
+		clientID:        clientID,
+		clientSecret:    clientSecret,
+		chatOwners:      chatOwners,
+		users:           users,
+		tokens:          tokens,
+		chat:            chatService,
+		viewers:         viewers,
+		alerts:          alertsService,
+		http:            netcfg.NewHTTPClient(20 * time.Second),
+		replyDB:         replyDB,
+		chatSlots:       make(chan struct{}, 8),
+		enabled:         true,
+		status:          "ожидает запуска",
+		sent:            make(map[string]time.Time),
+		accountAgeCache: make(map[string]accountAgeCacheEntry),
 	}
 }
 
 // Reconnect перезапускает IRC/EventSub с актуальным токеном из БД.
 func (r *Runtime) Reconnect(ctx context.Context) error {
-	r.stopClients()
-
-	return r.connect(ctx)
+	return r.connect(ctx, false)
 }
 
 // SetOnConnected — колбэк после успешного подключения (канал известен).
@@ -123,6 +157,9 @@ func (r *Runtime) SetNotificationRouter(router func(subscriptionType string, raw
 
 // IsOwnText проверяет, что сообщение недавно отправлено самим приложением.
 func (r *Runtime) IsOwnText(text string) bool {
+	if chat.IsTranslationReply(text) {
+		return true
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -142,23 +179,92 @@ func (r *Runtime) IsOwnText(text string) bool {
 
 // Say отправляет сообщение через Twitch Helix, с fallback на IRC.
 func (r *Runtime) Say(text string) error {
+	return r.send(text, "")
+}
+
+func (r *Runtime) Reply(parentID, text string) error {
+	if parentID == "" {
+		return errors.New("chat: missing reply parent")
+	}
+	if r.replyDB != nil {
+		channelID := r.CurrentChannelID()
+		if channelID == "" {
+			return errors.New("chat: not connected")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		claimed, err := claimTranslationReply(ctx, r.replyDB, channelID, parentID)
+		if err != nil || !claimed {
+			return err
+		}
+	}
+	return r.send(text, parentID)
+}
+
+func claimTranslationReply(ctx context.Context, db *sql.DB, channelID, parentID string) (bool, error) {
+	result, err := db.ExecContext(ctx, `
+		WITH expired AS (
+			DELETE FROM chat_translation_reply
+			WHERE ctid IN (
+				SELECT ctid FROM chat_translation_reply
+				WHERE claimed_at < now() - interval '1 day'
+				  AND (channel_id, message_id) <> ($1, $2)
+				LIMIT 100 FOR UPDATE SKIP LOCKED
+			)
+		)
+		INSERT INTO chat_translation_reply (channel_id, message_id)
+		VALUES ($1, $2)
+		ON CONFLICT DO NOTHING`, channelID, parentID)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
+func (r *Runtime) send(text, parentID string) error {
 	r.mu.Lock()
 	r.sent[text] = time.Now()
-	r.mu.Unlock()
-
-	if err := r.sayAPI(text); err == nil {
-		return nil
-	}
-
-	r.mu.Lock()
 	irc := r.irc
 	r.mu.Unlock()
 
-	if irc == nil {
-		return errors.New("chat: not connected")
+	// Standard chat messages go over the already-open IRC connection. Helix is
+	// kept as a fallback so a transient IRC write failure does not drop replies.
+	if parentID == "" && irc != nil {
+		if err := irc.Say(text); err == nil {
+			return nil
+		}
 	}
 
+	apiErr := r.sayAPI(text, parentID)
+	if apiErr == nil {
+		return nil
+	}
+	if !canFallbackToIRC(apiErr, parentID != "") {
+		return apiErr
+	}
+
+	if irc == nil {
+		return apiErr
+	}
+
+	if parentID != "" {
+		return irc.Reply(parentID, text)
+	}
 	return irc.Say(text)
+}
+
+func canFallbackToIRC(apiErr error, isReply bool) bool {
+	var rejected *chatMessageRejected
+	if errors.As(apiErr, &rejected) {
+		return false
+	}
+	if !isReply {
+		return true
+	}
+	// After a timeout or malformed response Helix may already have posted the reply.
+	var status chatMessageHTTPError
+	return errors.As(apiErr, &status) && (status == http.StatusUnauthorized || status == http.StatusForbidden)
 }
 
 func (r *Runtime) CurrentChannelLogin() string {
@@ -166,6 +272,12 @@ func (r *Runtime) CurrentChannelLogin() string {
 	defer r.mu.Unlock()
 
 	return r.broadcaster.Login
+}
+
+func (r *Runtime) CurrentChannelID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.broadcaster.ID
 }
 
 // SayTo отправляет сообщение в чат произвольного Twitch-канала от имени
@@ -228,6 +340,7 @@ func (r *Runtime) SayTo(ctx context.Context, channel, text string) error {
 			if err != nil {
 				return err
 			}
+
 			payload, _ = json.Marshal(map[string]string{
 				"broadcaster_id": users.Data[0].ID,
 				"sender_id":      senderID,
@@ -237,6 +350,9 @@ func (r *Runtime) SayTo(ctx context.Context, channel, text string) error {
 		}
 		if response.StatusCode != http.StatusOK {
 			return fmt.Errorf("chat messages returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		}
+		if err := checkChatMessageSent(strings.NewReader(string(body))); err != nil {
+			return err
 		}
 		r.mu.Lock()
 		r.sent[text] = time.Now()
@@ -248,23 +364,40 @@ func (r *Runtime) SayTo(ctx context.Context, channel, text string) error {
 	return errors.New("chat: unauthorized after token refresh")
 }
 
-func (r *Runtime) sayAPI(text string) error {
+func (r *Runtime) sayAPI(text, parentID string) error {
 	token, broadcasterID, err := r.credentials()
 	if err != nil {
 		return err
 	}
+	return r.sendAsBroadcaster(context.Background(), token, broadcasterID, text, parentID)
+}
 
-	payload, err := json.Marshal(map[string]string{
+// SendAsBroadcaster sends to the authenticated broadcaster's own channel.
+func (r *Runtime) SendAsBroadcaster(ctx context.Context, token, broadcasterID, text string) error {
+	return r.sendAsBroadcaster(ctx, token, broadcasterID, text, "")
+}
+
+func (r *Runtime) sendAsBroadcaster(ctx context.Context, token, broadcasterID, text, parentID string) error {
+	r.mu.Lock()
+	if r.broadcaster.ID == broadcasterID {
+		r.sent[text] = time.Now()
+	}
+	r.mu.Unlock()
+	fields := map[string]string{
 		"broadcaster_id": broadcasterID,
 		"sender_id":      broadcasterID,
 		"message":        text,
-	})
+	}
+	if parentID != "" {
+		fields["reply_parent_message_id"] = parentID
+	}
+	payload, err := json.Marshal(fields)
 	if err != nil {
 		return err
 	}
 
 	request, err := http.NewRequestWithContext(
-		context.Background(),
+		ctx,
 		http.MethodPost,
 		"https://api.twitch.tv/helix/chat/messages",
 		strings.NewReader(string(payload)),
@@ -283,9 +416,46 @@ func (r *Runtime) sayAPI(text string) error {
 	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("chat messages returned %d", response.StatusCode)
+		return chatMessageHTTPError(response.StatusCode)
 	}
 
+	return checkChatMessageSent(response.Body)
+}
+
+type chatMessageHTTPError int
+
+func (status chatMessageHTTPError) Error() string {
+	return fmt.Sprintf("chat messages returned %d", status)
+}
+
+type chatMessageRejected struct {
+	Code    string
+	Message string
+}
+
+func (err *chatMessageRejected) Error() string {
+	if err.Code == "" && err.Message == "" {
+		return "Twitch did not send the chat message"
+	}
+	return fmt.Sprintf("Twitch did not send the chat message (%s): %s", err.Code, err.Message)
+}
+
+func checkChatMessageSent(body io.Reader) error {
+	var result struct {
+		Data []struct {
+			IsSent     *bool               `json:"is_sent"`
+			DropReason chatMessageRejected `json:"drop_reason"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(body).Decode(&result); err != nil {
+		return fmt.Errorf("decode Twitch chat response: %w", err)
+	}
+	if len(result.Data) != 1 || result.Data[0].IsSent == nil {
+		return errors.New("Twitch chat response missing delivery status")
+	}
+	if !*result.Data[0].IsSent {
+		return &result.Data[0].DropReason
+	}
 	return nil
 }
 
@@ -532,6 +702,17 @@ func (r *Runtime) StreamStartedAt(ctx context.Context) (string, error) {
 
 // AccountCreatedAt возвращает дату регистрации пользователя Twitch.
 func (r *Runtime) AccountCreatedAt(ctx context.Context, userID string) (string, error) {
+	now := time.Now()
+	r.mu.Lock()
+	if r.accountAgeCache == nil {
+		r.accountAgeCache = make(map[string]accountAgeCacheEntry)
+	}
+	if cached, ok := r.accountAgeCache[userID]; ok && now.Before(cached.expiresAt) {
+		r.mu.Unlock()
+		return cached.createdAt, nil
+	}
+	r.mu.Unlock()
+
 	token, _, err := r.credentials()
 	if err != nil {
 		return "", err
@@ -557,7 +738,11 @@ func (r *Runtime) AccountCreatedAt(ctx context.Context, userID string) (string, 
 		return "", errors.New("user not found")
 	}
 
-	return payload.Data[0].CreatedAt, nil
+	createdAt := payload.Data[0].CreatedAt
+	r.mu.Lock()
+	r.accountAgeCache[userID] = accountAgeCacheEntry{createdAt: createdAt, expiresAt: now.Add(24 * time.Hour)}
+	r.mu.Unlock()
+	return createdAt, nil
 }
 
 // ChannelLogin возвращает логин текущего канала.
@@ -1700,6 +1885,8 @@ func (r *Runtime) SetEnabled(enabled bool) error {
 	r.mu.Unlock()
 
 	if !enabled {
+		r.connectMu.Lock()
+		defer r.connectMu.Unlock()
 		r.stopClients()
 		r.setStatus("выключено")
 
@@ -1710,7 +1897,7 @@ func (r *Runtime) SetEnabled(enabled bool) error {
 		return nil
 	}
 
-	return r.connect(ctx)
+	return r.connect(ctx, false)
 }
 
 func (r *Runtime) Status() string {
@@ -1735,7 +1922,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 		return nil
 	}
 
-	return r.connect(ctx)
+	return r.connect(ctx, false)
 }
 
 func (r *Runtime) setStatus(status string) {
@@ -1746,12 +1933,23 @@ func (r *Runtime) setStatus(status string) {
 }
 
 // connect получает актуальный токен, определяет канал и запускает клиентов.
-func (r *Runtime) connect(ctx context.Context) error {
-	token, err := r.tokens.First()
+func (r *Runtime) connect(ctx context.Context, refresh bool) error {
+	r.connectMu.Lock()
+	defer r.connectMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !r.Enabled() {
+		return errors.New("Twitch chat is disabled")
+	}
+	token, account, err := r.chatToken()
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			r.setStatus("нет токена — авторизуйте Twitch")
+			r.stopClients()
+			status := "нет токена Twitch для канала"
+			log.Printf("[Chat] %s", status)
+			r.setStatus(status)
 
 			return nil
 		}
@@ -1761,17 +1959,42 @@ func (r *Runtime) connect(ctx context.Context) error {
 		return err
 	}
 
-	accessToken, expiresIn := r.resolveAccessToken(ctx, token)
-
+	accessToken, expiresIn := token.AccessToken, 3600
+	if refresh {
+		accessToken, expiresIn = r.resolveAccessToken(ctx, token)
+	}
 	broadcaster, err := r.fetchBroadcaster(ctx, accessToken)
+	if err != nil && !refresh && token.RefreshToken != "" && ctx.Err() == nil {
+		accessToken, expiresIn = r.resolveAccessToken(ctx, token)
+		broadcaster, err = r.fetchBroadcaster(ctx, accessToken)
+	}
 	if err != nil {
 		r.setStatus("ошибка Twitch API: " + err.Error())
 
 		return err
 	}
+	expectedID := strconv.FormatInt(account.TwitchUserID, 10)
+	if broadcaster.ID != expectedID {
+		err := fmt.Errorf("Twitch token belongs to %q, expected %q", broadcaster.Login, account.Username)
+		r.setStatus(err.Error())
+		return err
+	}
+	if connectedID := r.CurrentChannelID(); connectedID != "" && connectedID != expectedID {
+		return errors.New("Twitch chat is already bound to another channel")
+	}
+	r.accountID = account.ID
+	r.twitchID = expectedID
 
 	r.chat.SetChannel(broadcaster.ID)
-	r.launchClients(ctx, accessToken, broadcaster)
+	// HTTP reconnect requests only own the token lookup. The sockets must
+	// outlive the request and stop with the runtime.
+	r.mu.Lock()
+	runtimeCtx := r.ctx
+	r.mu.Unlock()
+	if runtimeCtx == nil {
+		runtimeCtx = ctx
+	}
+	runCtx := r.launchClients(runtimeCtx, accessToken, broadcaster)
 	r.setStatus("подключён: #" + broadcaster.Login)
 
 	schedule := time.Duration(expiresIn-60) * time.Second
@@ -1779,17 +2002,62 @@ func (r *Runtime) connect(ctx context.Context) error {
 		schedule = 30 * time.Second
 	}
 
-	time.AfterFunc(schedule, func() {
-		if ctx.Err() != nil || !r.Enabled() {
-			return
-		}
-
-		if err := r.connect(ctx); err != nil {
-			log.Printf("[Chat] reconnect failed: %v", err)
-		}
-	})
+	go r.refreshChat(runCtx, schedule)
 
 	return nil
+}
+
+func (r *Runtime) refreshChat(runCtx context.Context, delay time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-runCtx.Done():
+			return
+		case <-timer.C:
+			if runCtx.Err() != nil {
+				return
+			}
+			if err := r.connect(runCtx, true); err != nil {
+				log.Printf("[Chat] reconnect failed: %v", err)
+				timer.Reset(time.Minute)
+				continue
+			}
+			return
+		}
+	}
+}
+
+func (r *Runtime) chatToken() (*data_base.Token, *data_base.User, error) {
+	if r.accountID != 0 {
+		user, err := r.users.Find(data_base.Where{Column: "id", Value: r.accountID})
+		if err != nil {
+			return nil, nil, err
+		}
+		if user.Banned || strconv.FormatInt(user.TwitchUserID, 10) != r.twitchID {
+			return nil, nil, sql.ErrNoRows
+		}
+		token, err := r.tokens.Find(data_base.Where{Column: "user_id", Value: user.ID})
+		return token, user, err
+	}
+	for _, login := range r.chatOwners {
+		user, err := r.users.Find(data_base.Where{Column: "username", Value: login})
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if user.Banned || user.TwitchUserID <= 0 {
+			continue
+		}
+		token, err := r.tokens.Find(data_base.Where{Column: "user_id", Value: user.ID})
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		return token, user, err
+	}
+	return nil, nil, sql.ErrNoRows
 }
 
 // resolveAccessToken обновляет refresh-токен; при сбое использует сохранённый access.
@@ -1900,8 +2168,27 @@ func (r *Runtime) fetchBroadcaster(ctx context.Context, accessToken string) (twi
 	}, nil
 }
 
+func (r *Runtime) receiveChat(message twitch.TwitchChatMessage) {
+	log.Printf("[Twitch chat] inbound channel=%q author=%q id=%q text=%q", message.Broadcaster.Login, message.Author.Login, message.MessageID, message.Text)
+	if message.Author.ID != "" && message.Author.ID == message.Broadcaster.ID && r.IsOwnText(message.Text) {
+		r.chat.ReceiveOwn(message)
+		return
+	}
+
+	// Keep LLM and Helix requests off the WebSocket read loops.
+	select {
+	case r.chatSlots <- struct{}{}:
+		go func() {
+			defer func() { <-r.chatSlots }()
+			r.chat.Receive(message)
+		}()
+	default:
+		r.chat.ReceiveOwn(message)
+	}
+}
+
 // launchClients перезапускает IRC и EventSub с актуальным токеном.
-func (r *Runtime) launchClients(ctx context.Context, accessToken string, broadcaster twitch.ChatUser) {
+func (r *Runtime) launchClients(ctx context.Context, accessToken string, broadcaster twitch.ChatUser) context.Context {
 	r.stopClients()
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -1917,7 +2204,7 @@ func (r *Runtime) launchClients(ctx context.Context, accessToken string, broadca
 	irc := twitchirc.New(twitchirc.Options{
 		AccessToken: accessToken,
 		Broadcaster: broadcaster,
-		OnMessage:   r.chat.Receive,
+		OnMessage:   r.receiveChat,
 	})
 
 	r.mu.Lock()
@@ -1935,7 +2222,7 @@ func (r *Runtime) launchClients(ctx context.Context, accessToken string, broadca
 		AccessToken: accessToken,
 		ClientID:    r.clientID,
 		Broadcaster: broadcaster,
-		OnMessage:   r.chat.Receive,
+		OnMessage:   r.receiveChat,
 		OnNotification: func(subscriptionType string, event json.RawMessage) {
 			if subscriptionType == "channel.chat.notification" {
 				if r.viewers != nil {
@@ -1963,6 +2250,7 @@ func (r *Runtime) launchClients(ctx context.Context, accessToken string, broadca
 
 	go irc.Connect(runCtx)
 	go eventSub.Connect(runCtx)
+	return runCtx
 }
 
 func (r *Runtime) stopClients() {

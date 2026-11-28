@@ -91,24 +91,31 @@ type Service struct {
 
 	cooldowns map[string]time.Time
 
-	writer    chat.Writer
-	channelID string
-	db        *sql.DB
-	now       func() time.Time
-	triggers  *triggers.Service
+	writer         chat.Writer
+	channelID      string
+	storageChannel string
+	db             *sql.DB
+	now            func() time.Time
+	triggers       *triggers.Service
 }
 
 func New(writer chat.Writer, db *sql.DB) *Service {
+	return NewForChannel(writer, db, "")
+}
+
+func NewForChannel(writer chat.Writer, db *sql.DB, channelID string) *Service {
 	service := &Service{
-		wallets:   make(map[string]*Wallet),
-		history:   make(map[string][]Transaction),
-		rewards:   make(map[string]*Reward),
-		settings:  defaultSettings(),
-		cooldowns: make(map[string]time.Time),
-		writer:    writer,
-		db:        db,
-		now:       time.Now,
-		triggers:  triggers.New(nil),
+		wallets:        make(map[string]*Wallet),
+		history:        make(map[string][]Transaction),
+		rewards:        make(map[string]*Reward),
+		settings:       defaultSettings(),
+		cooldowns:      make(map[string]time.Time),
+		writer:         writer,
+		db:             db,
+		channelID:      channelID,
+		storageChannel: channelID,
+		now:            time.Now,
+		triggers:       triggers.New(nil),
 	}
 
 	service.load()
@@ -239,7 +246,7 @@ func (s *Service) DeleteReward(id string) bool {
 	delete(s.rewards, id)
 
 	if s.db != nil {
-		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM reward WHERE id = $1`, id)
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM reward WHERE channel_id = $1 AND id = $2`, s.storageChannel, id)
 	}
 
 	return true
@@ -408,24 +415,13 @@ func (s *Service) RecentTransactions(limit int) []Transaction {
 
 /* ── Начисления ───────────────────────────────────────────────────── */
 
-// SetTriggers подключает настраиваемые стримером команды.
-// SetChannel сбрасывает баллы при смене канала, чтобы топ не смешивался.
+// SetChannel binds legacy points to their primary channel.
 func (s *Service) SetChannel(channelID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if channelID == "" || channelID == s.channelID {
-		return
-	}
-
-	s.channelID = channelID
-	s.wallets = make(map[string]*Wallet)
-	s.history = make(map[string][]Transaction)
-	s.transacion = nil
-
-	if s.db != nil {
-		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM points_transaction`)
-		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM points_wallet`)
+	if s.channelID == "" {
+		s.channelID = channelID
 	}
 }
 
@@ -701,9 +697,9 @@ func (s *Service) persistWallet(wallet Wallet) {
 	}
 
 	query := `
-		INSERT INTO points_wallet (user_id, login, display_name, balance, total_earned, total_spent, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (user_id) DO UPDATE SET
+		INSERT INTO points_wallet (user_id, login, display_name, balance, total_earned, total_spent, created_at, updated_at, channel_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (channel_id, user_id) DO UPDATE SET
 			login = EXCLUDED.login,
 			display_name = EXCLUDED.display_name,
 			balance = EXCLUDED.balance,
@@ -714,7 +710,7 @@ func (s *Service) persistWallet(wallet Wallet) {
 
 	_, err := s.db.ExecContext(context.Background(), query,
 		wallet.UserID, wallet.Login, wallet.DisplayName, wallet.Balance,
-		wallet.TotalEarned, wallet.TotalSpent, wallet.CreatedAt, wallet.UpdatedAt,
+		wallet.TotalEarned, wallet.TotalSpent, wallet.CreatedAt, wallet.UpdatedAt, s.storageChannel,
 	)
 	if err != nil {
 		log.Printf("[Points] wallet persist failed: %v", err)
@@ -727,13 +723,13 @@ func (s *Service) persistTransaction(transaction Transaction) {
 	}
 
 	query := `
-		INSERT INTO points_transaction (id, user_id, login, delta, reason, balance_after, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO points_transaction (id, user_id, login, delta, reason, balance_after, created_at, channel_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 
 	_, err := s.db.ExecContext(context.Background(), query,
 		transaction.ID, transaction.UserID, transaction.Login, transaction.Delta,
-		transaction.Reason, transaction.BalanceAfter, transaction.CreatedAt,
+		transaction.Reason, transaction.BalanceAfter, transaction.CreatedAt, s.storageChannel,
 	)
 	if err != nil {
 		log.Printf("[Points] transaction persist failed: %v", err)
@@ -746,9 +742,9 @@ func (s *Service) persistReward(reward Reward) {
 	}
 
 	query := `
-		INSERT INTO reward (id, name, cost, response, enabled)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (id) DO UPDATE SET
+		INSERT INTO reward (id, name, cost, response, enabled, channel_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (channel_id, id) DO UPDATE SET
 			name = EXCLUDED.name,
 			cost = EXCLUDED.cost,
 			response = EXCLUDED.response,
@@ -756,7 +752,7 @@ func (s *Service) persistReward(reward Reward) {
 	`
 
 	_, err := s.db.ExecContext(context.Background(), query,
-		reward.ID, reward.Name, reward.Cost, reward.Response, reward.Enabled,
+		reward.ID, reward.Name, reward.Cost, reward.Response, reward.Enabled, s.storageChannel,
 	)
 	if err != nil {
 		log.Printf("[Points] reward persist failed: %v", err)
@@ -776,8 +772,8 @@ func (s *Service) cleanupTestData() {
 		delete(s.history, userID)
 
 		if s.db != nil {
-			_, _ = s.db.ExecContext(context.Background(), `DELETE FROM points_transaction WHERE user_id = $1`, userID)
-			_, _ = s.db.ExecContext(context.Background(), `DELETE FROM points_wallet WHERE user_id = $1`, userID)
+			_, _ = s.db.ExecContext(context.Background(), `DELETE FROM points_transaction WHERE channel_id = $1 AND user_id = $2`, s.storageChannel, userID)
+			_, _ = s.db.ExecContext(context.Background(), `DELETE FROM points_wallet WHERE channel_id = $1 AND user_id = $2`, s.storageChannel, userID)
 		}
 	}
 
@@ -803,7 +799,7 @@ func (s *Service) load() {
 
 func (s *Service) loadWallets() {
 	rows, err := s.db.QueryContext(context.Background(),
-		`SELECT user_id, login, display_name, balance, total_earned, total_spent, created_at, updated_at FROM points_wallet`)
+		`SELECT user_id, login, display_name, balance, total_earned, total_spent, created_at, updated_at FROM points_wallet WHERE channel_id = $1`, s.storageChannel)
 	if err != nil {
 		log.Printf("[Points] wallets load failed: %v", err)
 
@@ -830,7 +826,7 @@ func (s *Service) loadWallets() {
 
 func (s *Service) loadRewards() {
 	rows, err := s.db.QueryContext(context.Background(),
-		`SELECT id, name, cost, response, enabled FROM reward`)
+		`SELECT id, name, cost, response, enabled FROM reward WHERE channel_id = $1`, s.storageChannel)
 	if err != nil {
 		log.Printf("[Points] rewards load failed: %v", err)
 
@@ -858,8 +854,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/points", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/points", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPatch || request.Method == http.MethodPost {
 			var settings Settings
 
@@ -882,7 +885,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/points/rewards", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/points/rewards", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -907,7 +910,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, saved)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/points/rewards/{id}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/points/rewards/{id}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodDelete {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -923,7 +926,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		response.WriteHeader(http.StatusNoContent)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/points/user/{userId}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/points/user/{userId}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		userID := request.PathValue("userId")
 
 		wallet, ok := service.Wallet(userID)

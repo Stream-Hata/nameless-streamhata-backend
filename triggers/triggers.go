@@ -44,10 +44,19 @@ type Service struct {
 	list   []Trigger
 	byName map[string]string
 	db     *sql.DB
+	key    string
 }
 
 func New(db *sql.DB) *Service {
-	service := &Service{db: db, list: defaults()}
+	return NewForChannel(db, "")
+}
+
+func NewForChannel(db *sql.DB, channelID string) *Service {
+	key := "triggers"
+	if channelID != "" {
+		key += ":" + channelID
+	}
+	service := &Service{db: db, key: key, list: defaults()}
 	service.load()
 	service.rebuild()
 
@@ -218,7 +227,7 @@ func (s *Service) load() {
 	var raw []byte
 
 	if err := s.db.QueryRowContext(context.Background(),
-		`SELECT value FROM app_setting WHERE key = 'triggers'`).Scan(&raw); err != nil {
+		`SELECT value FROM app_setting WHERE key = $1`, s.key).Scan(&raw); err != nil {
 		return
 	}
 
@@ -240,8 +249,8 @@ func (s *Service) persist() {
 	}
 
 	_, _ = s.db.ExecContext(context.Background(),
-		`INSERT INTO app_setting (key, value) VALUES ('triggers', $1)
-		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+		`INSERT INTO app_setting (key, value) VALUES ($1, $2)
+		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, s.key, string(raw))
 }
 
 /* ── Роуты ────────────────────────────────────────────────────────── */
@@ -250,8 +259,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/triggers", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/triggers", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, map[string]any{"triggers": service.List()})
 

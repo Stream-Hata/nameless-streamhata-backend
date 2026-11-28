@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/p7x-dev/nameless-streamhata-backend/media"
 	"github.com/p7x-dev/nameless-streamhata-backend/netcfg"
 )
 
@@ -16,20 +17,42 @@ type Deps interface {
 }
 
 type listResponse struct {
-	Tracks  []Track `json:"tracks"`
-	Stats   Stats   `json:"stats"`
-	Enabled bool    `json:"enabled"`
+	Tracks           []Track          `json:"tracks"`
+	Stats            Stats            `json:"stats"`
+	Enabled          bool             `json:"enabled"`
+	StreamerPlaylist StreamerPlaylist `json:"streamerPlaylist"`
+	Favorites        []Track          `json:"favorites"`
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/music", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/music/search-audio", func(_ *Service, response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		response.Header().Set("Cache-Control", "no-store")
+		sources, err := media.SearchAudio(request.Context(), request.URL.Query().Get("title"), request.URL.Query().Get("author"), request.URL.Query().Get("exclude"))
+		if err != nil {
+			writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"sources": sources})
+	})
+
+	serve("/rgg-sync/music", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
 			response.Header().Set("Cache-Control", "no-store")
 			writeJSON(response, http.StatusOK, listResponse{
-				Tracks:  service.List(),
-				Stats:   service.Stats(),
-				Enabled: service.Enabled(),
+				Tracks: service.List(), Stats: service.Stats(), Enabled: service.Enabled(),
+				StreamerPlaylist: service.StreamerPlaylist(), Favorites: service.Favorites(),
 			})
 		case http.MethodPost:
 			var body struct {
@@ -75,7 +98,115 @@ func RegisterRoutes(srv Deps, service *Service) {
 		}
 	})
 
-	srv.ServeEndpoint("/rgg-sync/music/", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/music/streamer-playlist", func(service *Service, response http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodGet:
+			writeJSON(response, http.StatusOK, service.StreamerPlaylist())
+		case http.MethodPost:
+			var body struct {
+				URL string `json:"url"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096)).Decode(&body); err != nil {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+				return
+			}
+			playlist, err := service.ImportStreamerPlaylist(request.Context(), body.URL)
+			if err != nil {
+				writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(response, http.StatusOK, playlist)
+		default:
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	serve("/rgg-sync/music/streamer-playlist/track", func(service *Service, response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			URL string `json:"url"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096)).Decode(&body); err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		playlist, err := service.AddStreamerTrack(request.Context(), body.URL)
+		if err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(response, http.StatusOK, playlist)
+	})
+
+	serve("/rgg-sync/music/streamer-playlist/index", func(service *Service, response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Index int `json:"index"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(response, request.Body, 1024)).Decode(&body); err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		index := service.SetStreamerPlaylistIndex(body.Index)
+		writeJSON(response, http.StatusOK, map[string]any{"ok": true, "index": index})
+	})
+
+	serve("/rgg-sync/music/streamer-playlist/", func(service *Service, response http.ResponseWriter, request *http.Request) {
+		videoID := strings.TrimPrefix(request.URL.Path, "/rgg-sync/music/streamer-playlist/")
+		if request.Method != http.MethodDelete || videoID == "" {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !service.RemoveStreamerTrack(videoID) {
+			http.Error(response, "track not found", http.StatusNotFound)
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
+
+	serve("/rgg-sync/music/favorites", func(service *Service, response http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			writeJSON(response, http.StatusOK, map[string]any{"tracks": service.Favorites()})
+			return
+		}
+		if request.Method != http.MethodPost {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			VideoID string `json:"videoId"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(response, request.Body, 2048)).Decode(&body); err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		if err := service.SetFavoriteByID(strings.TrimSpace(body.VideoID), true); err != nil {
+			writeJSON(response, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
+
+	serve("/rgg-sync/music/favorites/", func(service *Service, response http.ResponseWriter, request *http.Request) {
+		videoID := strings.TrimPrefix(request.URL.Path, "/rgg-sync/music/favorites/")
+		if request.Method != http.MethodDelete || videoID == "" {
+			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := service.SetFavoriteByID(videoID, false); err != nil {
+			http.Error(response, "track not found", http.StatusNotFound)
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
+
+	serve("/rgg-sync/music/", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		videoID := strings.TrimPrefix(request.URL.Path, "/rgg-sync/music/")
 
 		if request.Method != http.MethodDelete || videoID == "" {
@@ -93,7 +224,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		response.WriteHeader(http.StatusNoContent)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/music/current", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/music/current", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, map[string]any{"track": service.Current()})
 
@@ -120,7 +251,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, map[string]any{"ok": true})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/music/thumbnail", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/music/thumbnail", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -175,7 +306,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		_, _ = io.Copy(response, io.LimitReader(result.Body, 10<<20))
 	})
 
-	srv.ServeEndpoint("/rgg-sync/music/telegram", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/music/telegram", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -196,7 +327,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/music/export", func(response http.ResponseWriter, _ *http.Request) {
+	serve("/rgg-sync/music/export", func(service *Service, response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		response.Header().Set("Content-Disposition", `attachment; filename="jurykit-tracks.csv"`)
 

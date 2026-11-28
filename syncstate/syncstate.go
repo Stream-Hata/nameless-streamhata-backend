@@ -189,8 +189,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	handler := func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	handler := func(service *Service, response http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
 			writeJSON(response, http.StatusOK, service.Get())
@@ -209,9 +216,9 @@ func RegisterRoutes(srv Deps, service *Service) {
 		}
 	}
 
-	srv.ServeEndpoint("/rgg-sync", handler)
-	srv.ServeEndpoint("/rgg-sync/", handler)
-	srv.ServeEndpoint("/rgg-sync/game", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync", handler)
+	serve("/rgg-sync/", handler)
+	serve("/rgg-sync/game", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -220,7 +227,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 
 		writeJSON(response, http.StatusOK, service.GetGame())
 	})
-	srv.ServeEndpoint("/rgg-sync/dice", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/dice", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 

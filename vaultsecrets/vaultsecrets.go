@@ -85,6 +85,23 @@ func Load() error {
 		_ = os.Setenv(key, value)
 	}
 
+	// LLM provider credentials live in a separately writable KV path.
+	llmPayload, err := request(client, http.MethodGet, addr+"/v1/secret/data/streamhata-llm", nil, loginResponse.Auth.ClientToken)
+	if err == nil {
+		var llmResponse struct {
+			Data struct {
+				Data map[string]string `json:"data"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(llmPayload, &llmResponse) == nil {
+			for key, value := range llmResponse.Data.Data {
+				if key != "" && value != "" {
+					_ = os.Setenv(key, value)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -177,6 +194,42 @@ func PutSecret(name string, data map[string]string) error {
 		return err
 	}
 
+	_, err = request(client, http.MethodPost, addr+"/v1/secret/data/"+name, body, token)
+
+	return err
+}
+
+// MergeSecret updates selected keys without dropping other keys from the KV entry.
+func MergeSecret(name string, data map[string]string) error {
+	client, token, addr, err := auth()
+	if err != nil {
+		return err
+	}
+
+	payload, err := request(client, http.MethodGet, addr+"/v1/secret/data/"+name, nil, token)
+	if err != nil {
+		return err
+	}
+	var response struct {
+		Data struct {
+			Data map[string]string `json:"data"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return err
+	}
+	merged := response.Data.Data
+	if merged == nil {
+		merged = make(map[string]string)
+	}
+	for key, value := range data {
+		merged[key] = value
+	}
+
+	body, err := json.Marshal(map[string]any{"data": merged})
+	if err != nil {
+		return err
+	}
 	_, err = request(client, http.MethodPost, addr+"/v1/secret/data/"+name, body, token)
 
 	return err

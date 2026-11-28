@@ -290,8 +290,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/analytics", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/analytics", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusOK, map[string]any{
 			"current":  service.Current(),
 			"history":  service.History(),
@@ -299,7 +306,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/analytics/export", func(response http.ResponseWriter, _ *http.Request) {
+	serve("/rgg-sync/analytics/export", func(service *Service, response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		response.Header().Set("Content-Disposition", `attachment; filename="jurykit-analytics.csv"`)
 

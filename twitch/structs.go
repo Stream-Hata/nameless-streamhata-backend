@@ -124,6 +124,11 @@ type ChatBadge struct {
 
 type TwitchChatMessage struct {
 	MessageID string `json:"message_id"`
+	EventType string `json:"event_type,omitempty"`
+	TargetID string `json:"target_id,omitempty"`
+	TargetLogin string `json:"target_login,omitempty"`
+	DurationSeconds int `json:"duration_seconds,omitempty"`
+	Reason string `json:"reason,omitempty"`
 
 	Broadcaster ChatUser `json:"broadcaster"`
 	Author      ChatUser `json:"author"`

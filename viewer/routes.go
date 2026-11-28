@@ -11,9 +11,16 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, runtime *Runtime) {
-	srv.ServeEndpoint("/rgg-sync/viewers/latest-streak", func(
-		response http.ResponseWriter,
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Runtime) {
+	serve := func(path string, handler func(*Runtime, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/viewers/latest-streak", func(
+		runtime *Runtime, response http.ResponseWriter,
 		request *http.Request,
 	) {
 		streak := runtime.GetLatestStreak()
@@ -27,8 +34,8 @@ func RegisterRoutes(srv Deps, runtime *Runtime) {
 		writeJSON(response, http.StatusOK, streak)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/viewers/", func(
-		response http.ResponseWriter,
+	serve("/rgg-sync/viewers/", func(
+		runtime *Runtime, response http.ResponseWriter,
 		request *http.Request,
 	) {
 		userID := strings.TrimPrefix(request.URL.Path, "/rgg-sync/viewers/")
@@ -50,8 +57,8 @@ func RegisterRoutes(srv Deps, runtime *Runtime) {
 		writeJSON(response, http.StatusOK, viewer)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/viewers", func(
-		response http.ResponseWriter,
+	serve("/rgg-sync/viewers", func(
+		runtime *Runtime, response http.ResponseWriter,
 		request *http.Request,
 	) {
 		query := request.URL.Query()

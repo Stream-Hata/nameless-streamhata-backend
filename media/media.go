@@ -405,45 +405,37 @@ func ResolveAudio(ctx context.Context, raw string) (result, error) {
 }
 
 func resolveWithYTDLP(ctx context.Context, raw string) (result, error) {
-	path := strings.TrimSpace(os.Getenv("YTDLP_PATH"))
-
-	if path == "" {
-		if discovered, err := exec.LookPath("yt-dlp"); err == nil {
-			path = discovered
-		}
+	ytdlp, err := ytDLPExecutable()
+	if err != nil {
+		return result{}, err
+	}
+	resolved, err := resolveWithYTDLPProxy(ctx, ytdlp, raw, "")
+	if err == nil || ctx.Err() != nil {
+		return resolved, err
 	}
 
-	if path == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			candidates := []string{
-				filepath.Join(home, ".local", "bin", "yt-dlp"),
-				filepath.Join(home, "bin", "yt-dlp"),
-				filepath.Join(".", "bin", "yt-dlp"),
-			}
-
-			for _, candidate := range candidates {
-				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-					path = candidate
-
-					break
-				}
-			}
-		}
+	proxy := mediaProxyURL()
+	if proxy == "" {
+		return resolved, err
 	}
+	proxyCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	return resolveWithYTDLPProxy(proxyCtx, ytdlp, raw, proxy)
+}
 
-	if path == "" {
-		return result{}, fmt.Errorf("для YouTube/SoundCloud нужен yt-dlp или прокси в настройках сети")
-	}
-
+func resolveWithYTDLPProxy(ctx context.Context, ytdlp, raw, proxy string) (result, error) {
 	args := []string{"--no-playlist", "-f", "bestaudio", "-g"}
 
-	if proxy := mediaProxyURL(); proxy != "" {
+	if proxy != "" {
 		args = append(args, "--proxy", proxy)
 	}
 
 	args = append(args, raw)
 
-	command := exec.CommandContext(ctx, path, args...)
+	command := exec.CommandContext(ctx, ytdlp, args...)
+	if proxy == "" {
+		command.Env = withoutProxyEnvironment()
+	}
 	output, err := command.Output()
 	if err != nil {
 		return result{}, fmt.Errorf("не удалось извлечь аудио: %w", err)
@@ -457,6 +449,53 @@ func resolveWithYTDLP(ctx context.Context, raw string) (result, error) {
 	}
 
 	return result{}, fmt.Errorf("yt-dlp не вернул аудио")
+}
+
+func withoutProxyEnvironment() []string {
+	environment := os.Environ()
+	filtered := make([]string, 0, len(environment))
+	for _, variable := range environment {
+		key, _, _ := strings.Cut(variable, "=")
+		switch strings.ToLower(key) {
+		case "http_proxy", "https_proxy", "all_proxy", "no_proxy":
+			continue
+		}
+		filtered = append(filtered, variable)
+	}
+	return filtered
+}
+
+func ytDLPExecutable() (string, error) {
+	path := strings.TrimSpace(os.Getenv("YTDLP_PATH"))
+	if path != "" {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			path = ""
+		}
+	}
+	if path == "" {
+		if discovered, err := exec.LookPath("yt-dlp"); err == nil {
+			path = discovered
+		}
+	}
+	if path == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			for _, candidate := range []string{
+				filepath.Join(home, ".local", "bin", "yt-dlp"),
+				filepath.Join(home, "bin", "yt-dlp"),
+				filepath.Join(".", "bin", "yt-dlp"),
+			} {
+				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+					path = candidate
+					break
+				}
+			}
+		}
+	}
+	if path == "" {
+		return "", fmt.Errorf("для YouTube/SoundCloud нужен yt-dlp или прокси в настройках сети")
+	}
+	return path, nil
 }
 
 func mediaProxyURL() string {

@@ -33,20 +33,26 @@ type Service struct {
 	quotes []Quote
 	next   int
 
-	writer   chat.Writer
-	db       *sql.DB
-	voters   map[string]map[string]bool
-	randN    func(int) int
-	triggers *triggers.Service
+	writer    chat.Writer
+	db        *sql.DB
+	channelID string
+	voters    map[string]map[string]bool
+	randN     func(int) int
+	triggers  *triggers.Service
 }
 
 func New(writer chat.Writer, db *sql.DB) *Service {
+	return NewForChannel(writer, db, "")
+}
+
+func NewForChannel(writer chat.Writer, db *sql.DB, channelID string) *Service {
 	service := &Service{
-		writer:   writer,
-		db:       db,
-		voters:   make(map[string]map[string]bool),
-		randN:    rand.IntN,
-		triggers: triggers.New(nil),
+		writer:    writer,
+		db:        db,
+		channelID: channelID,
+		voters:    make(map[string]map[string]bool),
+		randN:     rand.IntN,
+		triggers:  triggers.New(nil),
 	}
 
 	service.load()
@@ -168,7 +174,7 @@ func (s *Service) Delete(id string) bool {
 			delete(s.voters, quote.ID)
 
 			if s.db != nil {
-				_, _ = s.db.ExecContext(context.Background(), `DELETE FROM quote WHERE id = $1`, quote.ID)
+				_, _ = s.db.ExecContext(context.Background(), `DELETE FROM quote WHERE channel_id = $1 AND id = $2`, s.channelID, quote.ID)
 			}
 			s.persistVotes()
 
@@ -297,10 +303,10 @@ func (s *Service) persist(quote Quote) {
 	}
 
 	_, err := s.db.ExecContext(context.Background(), `
-		INSERT INTO quote (id, text, author, added_by, created_at)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (id) DO NOTHING`,
-		quote.ID, quote.Text, quote.Author, quote.AddedBy, quote.CreatedAt)
+		INSERT INTO quote (id, text, author, added_by, created_at, channel_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (channel_id, id) DO NOTHING`,
+		quote.ID, quote.Text, quote.Author, quote.AddedBy, quote.CreatedAt, s.channelID)
 	if err != nil {
 		log.Printf("[Quotes] persist failed: %v", err)
 	}
@@ -312,7 +318,7 @@ func (s *Service) load() {
 	}
 
 	rows, err := s.db.QueryContext(context.Background(),
-		`SELECT id, text, author, added_by, created_at FROM quote ORDER BY created_at ASC`)
+		`SELECT id, text, author, added_by, created_at FROM quote WHERE channel_id = $1 ORDER BY created_at ASC`, s.channelID)
 	if err != nil {
 		log.Printf("[Quotes] load failed: %v", err)
 
@@ -336,13 +342,20 @@ func (s *Service) load() {
 	}
 }
 
+func (s *Service) votesKey() string {
+	if s.channelID == "" {
+		return "quote_votes"
+	}
+	return "quote_votes:" + s.channelID
+}
+
 func (s *Service) loadVotes() {
 	if s.db == nil {
 		return
 	}
 
 	var raw []byte
-	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'quote_votes'`).Scan(&raw); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = $1`, s.votesKey()).Scan(&raw); err != nil {
 		return
 	}
 
@@ -367,8 +380,8 @@ func (s *Service) persistVotes() {
 		return
 	}
 
-	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('quote_votes', $1)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, s.votesKey(), string(raw))
 }
 
 /* ── Роуты ────────────────────────────────────────────────────────── */
@@ -377,8 +390,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/quotes", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/quotes", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, map[string]any{"quotes": service.List()})
 
@@ -412,7 +432,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, quote)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/quotes/{id}/vote", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/quotes/{id}/vote", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -434,7 +454,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, quote)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/quotes/{id}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/quotes/{id}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodDelete {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 

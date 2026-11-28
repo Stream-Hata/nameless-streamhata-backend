@@ -31,17 +31,23 @@ var defaultWidgets = map[string]bool{
 }
 
 type Service struct {
-	mu       sync.RWMutex
-	settings map[string]bool
-	configs  map[string]map[string]any
-	db       *sql.DB
+	mu        sync.RWMutex
+	settings  map[string]bool
+	configs   map[string]map[string]any
+	db        *sql.DB
+	channelID string
 }
 
 func New(db *sql.DB) *Service {
+	return NewForChannel(db, "")
+}
+
+func NewForChannel(db *sql.DB, channelID string) *Service {
 	service := &Service{
-		settings: clone(defaultWidgets),
-		configs:  make(map[string]map[string]any),
-		db:       db,
+		settings:  clone(defaultWidgets),
+		configs:   make(map[string]map[string]any),
+		db:        db,
+		channelID: channelID,
 	}
 	service.load()
 
@@ -65,6 +71,13 @@ func (s *Service) Set(kind string, enabled bool) map[string]bool {
 	return s.Get()
 }
 
+func (s *Service) scopedKey(key string) string {
+	if s.channelID == "" {
+		return key
+	}
+	return key + ":" + s.channelID
+}
+
 func (s *Service) load() {
 	if s.db == nil {
 		return
@@ -75,7 +88,7 @@ func (s *Service) load() {
 	if err := s.db.QueryRowContext(
 		context.Background(),
 		`SELECT value FROM app_setting WHERE key = $1`,
-		storageKey,
+		s.scopedKey(storageKey),
 	).Scan(&raw); err != nil {
 		return
 	}
@@ -97,7 +110,7 @@ func (s *Service) load() {
 	if err := s.db.QueryRowContext(
 		context.Background(),
 		`SELECT value FROM app_setting WHERE key = $1`,
-		configsKey,
+		s.scopedKey(configsKey),
 	).Scan(&configsRaw); err != nil {
 		return
 	}
@@ -132,7 +145,7 @@ func (s *Service) persistConfigs() {
 		context.Background(),
 		`INSERT INTO app_setting (key, value) VALUES ($1, $2)
 		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-		configsKey,
+		s.scopedKey(configsKey),
 		string(raw),
 	)
 }
@@ -151,7 +164,7 @@ func (s *Service) persist() {
 		context.Background(),
 		`INSERT INTO app_setting (key, value) VALUES ($1, $2)
 		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-		storageKey,
+		s.scopedKey(storageKey),
 		string(raw),
 	)
 }
@@ -199,8 +212,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/widgets", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/widgets", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -210,7 +230,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, map[string]any{"widgets": service.Get()})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/widgets/{kind}/config", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/widgets/{kind}/config", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		kind := request.PathValue("kind")
 
 		if kind == "" {
@@ -242,7 +262,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, map[string]any{"config": service.SetConfig(kind, config)})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/widgets/{kind}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/widgets/{kind}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost && request.Method != http.MethodPatch {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 

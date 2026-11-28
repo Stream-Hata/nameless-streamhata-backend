@@ -10,7 +10,7 @@
 - [x] `chat` — ring-buffer чата, дедупликация, подписчики (`twitch/chat/chat.service.ts`)
 - [x] `twitchirc` — IRC WebSocket: PASS/NICK/CAP/JOIN, tags, PING/PONG, реконнект (`twitch/twitch-irc.ts`) + тесты парсера
 - [x] `eventsub` — WS-клиент, `session_welcome/reconnect`, `channel.chat.message` (`channel.chat.notification` — вместе с viewer, далее) + тесты
-- [x] `llm` — Groq HTTP (net/http): `Classify` + `GenerateVerdict` + fallback, env `GROQ_API_KEY`, `GROQ_MODEL` + тесты
+- [x] `llm` — OpenRouter HTTP (net/http): `Classify` + `GenerateVerdict` + fallback, env `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` + тесты
 - [x] `chatjury` — сервис (settings/validation, голоса, таймер, вердикт с generationId, `Finish()` для кнопки «Стоп») + тесты
 - [x] `chatjury` — планировщик (кандидаты, `!yea/!nei`, порог min_confidence) + тесты
 - [x] `chatruntime` — runtime (refresh token по таймеру, helix/users, перезапуск IRC+EventSub, статус/тумблер интеграции)

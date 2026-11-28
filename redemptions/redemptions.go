@@ -61,24 +61,30 @@ type Service struct {
 	mappings map[string]*Mapping
 	records  []Record
 
-	points   *points.Service
-	actions  Actioner
-	rewards  RewardManager
-	commands CommandRunner
-	db       *sql.DB
-	now      func() time.Time
+	points    *points.Service
+	actions   Actioner
+	rewards   RewardManager
+	commands  CommandRunner
+	db        *sql.DB
+	channelID string
+	now       func() time.Time
 
 	wheelEntry func(userID, login, displayName, title string, luck bool, bet int) error
 }
 
 func New(pointsService *points.Service, actions Actioner, db *sql.DB) *Service {
+	return NewForChannel(pointsService, actions, db, "")
+}
+
+func NewForChannel(pointsService *points.Service, actions Actioner, db *sql.DB, channelID string) *Service {
 	service := &Service{
-		mappings: make(map[string]*Mapping),
-		records:  make([]Record, 0, 100),
-		points:   pointsService,
-		actions:  actions,
-		db:       db,
-		now:      time.Now,
+		mappings:  make(map[string]*Mapping),
+		records:   make([]Record, 0, 100),
+		points:    pointsService,
+		actions:   actions,
+		db:        db,
+		channelID: channelID,
+		now:       time.Now,
 	}
 
 	service.load()
@@ -168,7 +174,7 @@ func (s *Service) Delete(id string) bool {
 	delete(s.mappings, id)
 
 	if s.db != nil {
-		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM redemption_mapping WHERE id = $1`, id)
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM redemption_mapping WHERE channel_id = $1 AND id = $2`, s.channelID, id)
 	}
 
 	return true
@@ -387,14 +393,14 @@ func (s *Service) persistMapping(mapping Mapping) {
 	}
 
 	_, err := s.db.ExecContext(context.Background(), `
-		INSERT INTO redemption_mapping (id, reward_title, action, payload, enabled)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (id) DO UPDATE SET
+		INSERT INTO redemption_mapping (id, reward_title, action, payload, enabled, channel_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (channel_id, id) DO UPDATE SET
 			reward_title = EXCLUDED.reward_title,
 			action = EXCLUDED.action,
 			payload = EXCLUDED.payload,
 			enabled = EXCLUDED.enabled`,
-		mapping.ID, mapping.RewardTitle, mapping.Action, mapping.Payload, mapping.Enabled)
+		mapping.ID, mapping.RewardTitle, mapping.Action, mapping.Payload, mapping.Enabled, s.channelID)
 	if err != nil {
 		log.Printf("[Redemptions] persist failed: %v", err)
 	}
@@ -406,7 +412,7 @@ func (s *Service) load() {
 	}
 
 	rows, err := s.db.QueryContext(context.Background(),
-		`SELECT id, reward_title, action, payload, enabled FROM redemption_mapping`)
+		`SELECT id, reward_title, action, payload, enabled FROM redemption_mapping WHERE channel_id = $1`, s.channelID)
 	if err != nil {
 		log.Printf("[Redemptions] load failed: %v", err)
 
@@ -434,7 +440,14 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
 	type rewardBody struct {
 		ID      string `json:"id"`
 		Title   string `json:"title"`
@@ -445,7 +458,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		Payload string `json:"payload"`
 	}
 
-	srv.ServeEndpoint("/rgg-sync/twitch-rewards", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/twitch-rewards", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if service.rewards == nil {
 			http.Error(response, "twitch is not connected", http.StatusServiceUnavailable)
 
@@ -539,7 +552,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		}
 	})
 
-	srv.ServeEndpoint("/rgg-sync/twitch-rewards/{id}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/twitch-rewards/{id}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodDelete || service.rewards == nil {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -557,7 +570,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		response.WriteHeader(http.StatusNoContent)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/redemptions", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/redemptions", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, map[string]any{
 				"mappings": service.Mappings(),
@@ -591,7 +604,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, saved)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/redemptions/{id}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/redemptions/{id}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodDelete {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 

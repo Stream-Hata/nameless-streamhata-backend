@@ -165,8 +165,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/stream", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/stream", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, service.Refresh(request.Context()))
 
@@ -200,7 +207,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, info)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/stream/commercial", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/stream/commercial", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -222,7 +229,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, map[string]any{"ok": true, "length": body.Length})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/stream/shield", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/stream/shield", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 

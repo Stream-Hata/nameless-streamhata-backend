@@ -66,10 +66,11 @@ type TimerState struct {
 }
 
 type Token struct {
-	ID           int    `db:"id"`
-	AccessToken  string `db:"access_token"`
-	RefreshToken string `db:"refresh_token"`
-	UserID       int    `db:"user_id"`
+	ID               int    `db:"id"`
+	AccessToken      string `db:"access_token"`
+	RefreshToken     string `db:"refresh_token"`
+	RefreshTokenHash string `db:"refresh_token_hash"`
+	UserID           int    `db:"user_id"`
 }
 
 func (Token) TableName() string {

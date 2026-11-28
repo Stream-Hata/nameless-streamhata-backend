@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	data_base "github.com/p7x-dev/nameless-streamhata-backend/data-base"
+	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 )
 
 const steamOpenID = "https://steamcommunity.com/openid/login"
@@ -384,9 +386,23 @@ func (s *LinkService) login(request *http.Request) string {
 	if s.db == nil {
 		return ""
 	}
+	if id, present, err := twitch.BrowserSessionUserID(s.db, request); present {
+		if err != nil {
+			return ""
+		}
+		var login string
+		if err := s.db.QueryRowContext(request.Context(), `SELECT username FROM users WHERE id = $1 AND banned = false`, id).Scan(&login); err != nil {
+			return ""
+		}
+		return login
+	}
 
 	cookie, err := request.Cookie("e-hub-refresh-token")
 	if err != nil || cookie.Value == "" {
+		return ""
+	}
+	digest, err := data_base.RefreshTokenDigest(cookie.Value)
+	if err != nil {
 		return ""
 	}
 
@@ -394,8 +410,8 @@ func (s *LinkService) login(request *http.Request) string {
 
 	err = s.db.QueryRowContext(
 		context.Background(),
-		`SELECT u.username FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.refresh_token = $1 LIMIT 1`,
-		cookie.Value,
+		`SELECT u.username FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.refresh_token_hash = $1 LIMIT 1`,
+		digest,
 	).Scan(&login)
 	if err != nil {
 		return ""

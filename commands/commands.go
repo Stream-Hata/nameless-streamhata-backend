@@ -47,6 +47,23 @@ var levels = map[string]int{
 	"broadcaster": 4,
 }
 
+func CanRunAtLevel(message twitch.TwitchChatMessage, required string) bool {
+	want := levels[required]
+	if want == 0 || (message.Author.ID != "" && message.Author.ID == message.Broadcaster.ID) {
+		return true
+	}
+	for _, badge := range message.Badges {
+		level := badge.SetID
+		if level == "founder" {
+			level = "subscriber"
+		}
+		if levels[level] >= want {
+			return true
+		}
+	}
+	return false
+}
+
 // Service хранит команды, кулдауны и обрабатывает сообщения чата.
 type Actioner interface {
 	AwardPoints(userID, login, displayName string, amount int, reason string) error
@@ -84,6 +101,7 @@ type Service struct {
 	replies   map[string]string
 	limits    map[string]string
 	db        *sql.DB
+	channelID string
 	now       func() time.Time
 }
 
@@ -102,6 +120,10 @@ func (s *Service) SetActioner(actioner Actioner) {
 }
 
 func New(writer chat.Writer, db *sql.DB) *Service {
+	return NewForChannel(writer, db, "")
+}
+
+func NewForChannel(writer chat.Writer, db *sql.DB, channelID string) *Service {
 	service := &Service{
 		commands:  make(map[string]*Command),
 		cooldowns: make(map[string]time.Time),
@@ -111,6 +133,7 @@ func New(writer chat.Writer, db *sql.DB) *Service {
 		limits:    make(map[string]string),
 		writer:    writer,
 		db:        db,
+		channelID: channelID,
 		now:       time.Now,
 	}
 
@@ -229,12 +252,12 @@ func (s *Service) Upsert(command Command) (Command, error) {
 	s.actions[command.ID] = command.Action
 	s.replies[command.ID] = command.Reply
 	s.limits[command.ID] = command.LimitReply
-	s.mu.Unlock()
 
 	s.persist(command)
 	s.persistActions()
 	s.persistReplies()
 	s.persistLimits()
+	s.mu.Unlock()
 
 	return command, nil
 }
@@ -274,7 +297,7 @@ func (s *Service) Delete(id string) bool {
 			s.persistLimits()
 
 			if s.db != nil {
-				_, _ = s.db.ExecContext(context.Background(), `DELETE FROM command WHERE id = $1`, id)
+				_, _ = s.db.ExecContext(context.Background(), `DELETE FROM command WHERE channel_id = $1 AND id = $2`, s.channelID, id)
 			}
 
 			return true
@@ -290,6 +313,10 @@ func (s *Service) Variables() []Variable {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.variablesLocked()
+}
+
+func (s *Service) variablesLocked() []Variable {
 	result := make([]Variable, 0, len(s.custom))
 
 	for _, variable := range s.custom {
@@ -314,9 +341,8 @@ func (s *Service) SaveVariable(variable Variable) (Variable, error) {
 
 	s.mu.Lock()
 	s.custom[variable.Name] = variable
-	s.mu.Unlock()
-
 	s.persistVariables()
+	s.mu.Unlock()
 
 	return variable, nil
 }
@@ -360,7 +386,7 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 		command = s.findByAliasLocked(name)
 	}
 
-	if command == nil || !command.Enabled {
+	if command == nil || !command.Enabled || !CanRunAtLevel(message, command.UserLevel) {
 		s.mu.Unlock()
 
 		return
@@ -370,8 +396,9 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 	now := s.now()
 
 	if until, cooling := s.cooldowns[userKey]; cooling && now.Before(until) {
-		limitReply := strings.TrimSpace(s.expand(command.LimitReply, message))
+		reply := command.LimitReply
 		s.mu.Unlock()
+		limitReply := strings.TrimSpace(s.expand(reply, message))
 
 		if limitReply != "" && s.writer != nil {
 			mention := "@" + message.Author.Login
@@ -391,24 +418,36 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 		s.cooldowns[userKey] = now.Add(time.Duration(command.CooldownSeconds) * time.Second)
 	}
 
+	snapshot := *command
 	s.mu.Unlock()
+	go s.persist(snapshot)
 
-	s.persist(*command)
-	s.execute(*command, message, s.expandDepth(response, message, 0, command.Counter))
+	s.execute(snapshot, message, s.expandDepth(response, message, 0, snapshot.Counter), 0)
 }
 
 func (s *Service) Run(id string, message twitch.TwitchChatMessage) bool {
+	return s.run(id, message, 0)
+}
+
+func (s *Service) run(id string, message twitch.TwitchChatMessage, depth int) bool {
+	if depth >= 10 {
+		return false
+	}
 	s.mu.Lock()
 
 	for _, command := range s.commands {
 		if command.ID != id || !command.Enabled {
 			continue
 		}
+		if depth > 0 && !CanRunAtLevel(message, command.UserLevel) {
+			s.mu.Unlock()
+			return false
+		}
 
 		snapshot := *command
 		response := render(snapshot.Response, message, snapshot.Counter+1)
 		s.mu.Unlock()
-		s.execute(snapshot, message, s.expandDepth(response, message, 0, snapshot.Counter+1))
+		s.execute(snapshot, message, s.expandDepth(response, message, 0, snapshot.Counter+1), depth)
 
 		return true
 	}
@@ -524,7 +563,7 @@ func (s *Service) sendLimitReply(command Command, message twitch.TwitchChatMessa
 	_ = s.writer.Say(singleChatMessage(reply, 500))
 }
 
-func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string) {
+func (s *Service) execute(command Command, message twitch.TwitchChatMessage, response string, depth int) {
 	defer func() { s.sendReply(command, message, response) }()
 
 	switch command.Action {
@@ -539,7 +578,7 @@ func (s *Service) execute(command Command, message twitch.TwitchChatMessage, res
 		s.setVariableAction(strings.TrimSpace(command.Response), true, delta)
 		return
 	case "command.run":
-		s.runByName(strings.TrimSpace(command.Response), message)
+		s.runByName(strings.TrimSpace(command.Response), message, depth+1)
 		return
 	}
 
@@ -687,8 +726,8 @@ func (s *Service) setVariableAction(raw string, increment bool, delta ...int) {
 	}
 
 	s.custom[strings.ToLower(name)] = variable
-	s.mu.Unlock()
 	s.persistVariables()
+	s.mu.Unlock()
 }
 
 func (s *Service) RunByName(name string, message twitch.TwitchChatMessage) bool {
@@ -721,7 +760,7 @@ func (s *Service) ApplyVariable(action, raw string) {
 	}
 }
 
-func (s *Service) runByName(raw string, message twitch.TwitchChatMessage) {
+func (s *Service) runByName(raw string, message twitch.TwitchChatMessage, depth int) {
 	name := normalizeName(strings.TrimPrefix(strings.TrimSpace(raw), "!"))
 
 	s.mu.Lock()
@@ -736,7 +775,7 @@ func (s *Service) runByName(raw string, message twitch.TwitchChatMessage) {
 	s.mu.Unlock()
 
 	if target != nil {
-		s.Run(target.ID, message)
+		s.run(target.ID, message, depth)
 	}
 }
 
@@ -888,13 +927,20 @@ func render(template string, message twitch.TwitchChatMessage, counter int) stri
 
 /* ── Персистентность ──────────────────────────────────────────────── */
 
+func (s *Service) settingKey(key string) string {
+	if s.channelID == "" {
+		return key
+	}
+	return key + ":" + s.channelID
+}
+
 func (s *Service) loadActions() {
 	if s.db == nil {
 		return
 	}
 
 	var raw []byte
-	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'command_actions'`).Scan(&raw); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = $1`, s.settingKey("command_actions")).Scan(&raw); err != nil {
 		return
 	}
 
@@ -917,8 +963,8 @@ func (s *Service) persistActions() {
 		return
 	}
 
-	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_actions', $1)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, s.settingKey("command_actions"), string(raw))
 }
 
 func (s *Service) loadReplies() {
@@ -927,7 +973,7 @@ func (s *Service) loadReplies() {
 	}
 
 	var raw []byte
-	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'command_replies'`).Scan(&raw); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = $1`, s.settingKey("command_replies")).Scan(&raw); err != nil {
 		return
 	}
 
@@ -953,8 +999,8 @@ func (s *Service) persistReplies() {
 		return
 	}
 
-	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_replies', $1)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, s.settingKey("command_replies"), string(raw))
 }
 
 func (s *Service) loadLimits() {
@@ -963,7 +1009,7 @@ func (s *Service) loadLimits() {
 	}
 
 	var raw []byte
-	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'command_limits'`).Scan(&raw); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = $1`, s.settingKey("command_limits")).Scan(&raw); err != nil {
 		return
 	}
 
@@ -985,8 +1031,8 @@ func (s *Service) persistLimits() {
 		return
 	}
 
-	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_limits', $1)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, s.settingKey("command_limits"), string(raw))
 }
 
 func (s *Service) loadVariables() {
@@ -995,7 +1041,7 @@ func (s *Service) loadVariables() {
 	}
 
 	var raw []byte
-	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'command_variables'`).Scan(&raw); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = $1`, s.settingKey("command_variables")).Scan(&raw); err != nil {
 		return
 	}
 
@@ -1014,19 +1060,21 @@ func (s *Service) persistVariables() {
 		return
 	}
 
-	raw, err := json.Marshal(s.Variables())
+	raw, err := json.Marshal(s.variablesLocked())
 	if err != nil {
 		return
 	}
 
-	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('command_variables', $1)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, s.settingKey("command_variables"), string(raw))
 }
 
 func (s *Service) persist(command Command) {
 	if s.db == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
 	aliases, err := json.Marshal(command.Aliases)
 	if err != nil {
@@ -1034,19 +1082,19 @@ func (s *Service) persist(command Command) {
 	}
 
 	query := `
-		INSERT INTO command (id, name, aliases, response, cooldown_seconds, user_level, enabled, counter, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (id) DO UPDATE SET
+		INSERT INTO command (id, name, aliases, response, cooldown_seconds, user_level, enabled, counter, created_at, channel_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (channel_id, id) DO UPDATE SET
 			name = EXCLUDED.name,
 			aliases = EXCLUDED.aliases,
 			response = EXCLUDED.response,
 			cooldown_seconds = EXCLUDED.cooldown_seconds,
 			user_level = EXCLUDED.user_level,
 			enabled = EXCLUDED.enabled,
-			counter = EXCLUDED.counter
+			counter = GREATEST(command.counter, EXCLUDED.counter)
 	`
 
-	_, err = s.db.ExecContext(context.Background(), query,
+	_, err = s.db.ExecContext(ctx, query,
 		command.ID,
 		command.Name,
 		string(aliases),
@@ -1056,6 +1104,7 @@ func (s *Service) persist(command Command) {
 		command.Enabled,
 		command.Counter,
 		command.CreatedAt,
+		s.channelID,
 	)
 	if err != nil {
 		log.Printf("[Commands] persist failed: %v", err)
@@ -1068,7 +1117,7 @@ func (s *Service) load() {
 	}
 
 	rows, err := s.db.QueryContext(context.Background(),
-		`SELECT id, name, aliases, response, cooldown_seconds, user_level, enabled, counter, created_at FROM command`)
+		`SELECT id, name, aliases, response, cooldown_seconds, user_level, enabled, counter, created_at FROM command WHERE channel_id = $1`, s.channelID)
 	if err != nil {
 		log.Printf("[Commands] load failed: %v", err)
 
@@ -1120,8 +1169,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/command-variables", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/command-variables", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
 			writeJSON(response, http.StatusOK, map[string]any{"variables": service.Variables()})
@@ -1144,7 +1200,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		}
 	})
 
-	srv.ServeEndpoint("/rgg-sync/command-variables/{id}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/command-variables/{id}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodDelete {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -1158,7 +1214,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		response.WriteHeader(http.StatusNoContent)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/commands", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/commands", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, map[string]any{"commands": service.List()})
 
@@ -1189,7 +1245,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, saved)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/commands/export", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/commands/export", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -1219,7 +1275,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		}
 	})
 
-	srv.ServeEndpoint("/rgg-sync/commands/{id}/test", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/commands/{id}/test", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		text, ok := service.Test(request.PathValue("id"))
 
 		if !ok {
@@ -1231,7 +1287,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, map[string]string{"response": text})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/commands/{id}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/commands/{id}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPatch {
 			var body struct {
 				Enabled bool `json:"enabled"`

@@ -431,6 +431,11 @@ func heuristicClassification(text string) llm.Classification {
 			return llm.Classification{IsAdvice: true, Confidence: 0.85}
 		}
 	}
+	for _, word := range strings.Fields(lower) {
+		if strings.HasSuffix(word, "ьтесь") || strings.HasSuffix(word, "итесь") || strings.HasSuffix(word, "айтесь") {
+			return llm.Classification{IsAdvice: true, Confidence: 0.85}
+		}
+	}
 
 	return llm.Classification{}
 }
@@ -582,6 +587,11 @@ func (s *Scheduler) processMessage(message twitch.TwitchChatMessage) {
 		return
 	}
 
+	settings := s.service.GetSettings()
+	if !settings.Enabled || !heuristicClassification(text).IsAdvice {
+		return
+	}
+
 	s.mu.Lock()
 
 	if _, used := s.used[message.MessageID]; used {
@@ -596,8 +606,6 @@ func (s *Scheduler) processMessage(message twitch.TwitchChatMessage) {
 	if err != nil {
 		return
 	}
-
-	settings := s.service.GetSettings()
 
 	if !classification.IsAdvice || classification.Confidence < settings.MinConfidence {
 		return
@@ -659,16 +667,23 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/chat-jury/current", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/chat-jury/current", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusOK, service.GetCurrentPublic())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/chat-jury/result", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/chat-jury/result", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusOK, service.GetLastResult())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/chat-jury/start", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/chat-jury/start", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -711,7 +726,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, service.GetCurrentPublic())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/chat-jury/finish", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/chat-jury/finish", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -722,7 +737,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, service.GetLastResult())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/chat-jury/settings", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/chat-jury/settings", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPatch || request.Method == http.MethodPost {
 			var patch SettingsPatch
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -72,6 +73,12 @@ func (p *Provider) proxyFunc(request *http.Request) (*url.URL, error) {
 	if os.Getenv("NETCFG_DISABLE_PROXY") == "1" {
 		return nil, nil
 	}
+	if request.URL != nil {
+		host := strings.ToLower(strings.TrimSuffix(request.URL.Hostname(), "."))
+		if host == "twitch.tv" || strings.HasSuffix(host, ".twitch.tv") || host == "donationalerts.com" || strings.HasSuffix(host, ".donationalerts.com") {
+			return nil, nil
+		}
+	}
 
 	settings := p.Get()
 
@@ -107,6 +114,24 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
+// NewDirectHTTPClient creates an HTTP client that does not use the application proxy.
+// Use it for OAuth endpoints whose availability must not depend on an optional proxy.
+func NewDirectHTTPClient(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			MaxIdleConns:          8,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 20 * time.Second,
+		},
+	}
+}
+
 // Test проверяет доступность 7TV через текущий прокси.
 func (p *Provider) Test(ctx context.Context) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://7tv.io/v3/emote-sets/global", nil)
@@ -132,6 +157,7 @@ func (p *Provider) Test(ctx context.Context) error {
 
 func (p *Provider) load() {
 	if p.db == nil {
+		p.useEnvironmentProxy()
 		return
 	}
 
@@ -141,6 +167,7 @@ func (p *Provider) load() {
 		context.Background(),
 		`SELECT value FROM app_setting WHERE key = 'network'`,
 	).Scan(&raw); err != nil {
+		p.useEnvironmentProxy()
 		return
 	}
 
@@ -151,6 +178,27 @@ func (p *Provider) load() {
 		p.settings = settings
 		p.mu.Unlock()
 	}
+}
+
+func (p *Provider) useEnvironmentProxy() {
+	proxy := strings.TrimSpace(os.Getenv("HTTPS_PROXY"))
+	if proxy == "" {
+		proxy = strings.TrimSpace(os.Getenv("https_proxy"))
+	}
+	if proxy == "" {
+		proxy = strings.TrimSpace(os.Getenv("HTTP_PROXY"))
+	}
+	if proxy == "" {
+		proxy = strings.TrimSpace(os.Getenv("http_proxy"))
+	}
+	parsed, err := url.Parse(proxy)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return
+	}
+
+	p.mu.Lock()
+	p.settings = Settings{ProxyURL: proxy, Enabled: true}
+	p.mu.Unlock()
 }
 
 func (p *Provider) persist() {
@@ -177,8 +225,18 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, provider *Provider) {
-	srv.ServeEndpoint("/rgg-sync/network", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, provider *Provider, authorized func(*http.Request) bool) {
+	serve := func(path string, handler http.HandlerFunc) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			response.Header().Set("Cache-Control", "private, no-store")
+			if !authorized(request) {
+				http.Error(response, "forbidden", http.StatusForbidden)
+				return
+			}
+			handler(response, request)
+		})
+	}
+	serve("/rgg-sync/network", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, provider.Get())
 
@@ -209,7 +267,7 @@ func RegisterRoutes(srv Deps, provider *Provider) {
 		writeJSON(response, http.StatusOK, updated)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/network/test", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/network/test", func(response http.ResponseWriter, request *http.Request) {
 		if err := provider.Test(request.Context()); err != nil {
 			writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
 

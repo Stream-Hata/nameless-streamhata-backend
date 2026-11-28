@@ -49,7 +49,11 @@ func (s *Service) gameDiscussion(response http.ResponseWriter, request *http.Req
 }
 
 func (s *Service) listGameDiscussion(response http.ResponseWriter, request *http.Request, slug string) {
-	userID, _, _, _ := s.user(request)
+	userID, _, _, ok := s.user(request)
+	if !ok {
+		writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "twitch authorization required"})
+		return
+	}
 	rows, err := s.db.QueryContext(request.Context(), `
 		SELECT d.id, d.user_id, u.username, COALESCE(NULLIF(u.display_name, ''), u.username), d.message, d.parent_id, d.created_at,
 			(SELECT count(*) FROM game_discussion_likes l WHERE l.message_id = d.id),

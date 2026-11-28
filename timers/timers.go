@@ -2,6 +2,8 @@
 package timers
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -35,12 +37,50 @@ type Timer struct {
 
 // Service хранит таймеры и отправляет сообщения по расписанию.
 type Service struct {
-	mu       sync.Mutex
-	timers   map[string]*Timer
-	writer   chat.Writer
-	channel  string
-	lastChat time.Time
-	now      func() time.Time
+	mu        sync.Mutex
+	timers    map[string]*Timer
+	writer    chat.Writer
+	channel   string
+	lastChat  time.Time
+	now       func() time.Time
+	db        *sql.DB
+	channelID string
+}
+
+func (s *Service) UseStorage(db *sql.DB, channelID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.channelID == channelID {
+		return nil
+	}
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT config FROM channel_chat_timer WHERE channel_id = $1`, channelID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	loaded := make(map[string]*Timer)
+	for rows.Next() {
+		var raw []byte
+		var timer Timer
+		if err := rows.Scan(&raw); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(raw, &timer); err != nil {
+			return err
+		}
+		timer.LastFiredAt = s.now()
+		loaded[timer.ID] = &timer
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	s.timers = loaded
+	s.lastChat = time.Time{}
+	s.channelID = channelID
+	s.db = db
+	return nil
 }
 
 func New(writer chat.Writer) *Service {
@@ -82,6 +122,13 @@ func (s *Service) SetEnabled(enabled bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.db != nil {
+		if _, err := s.db.ExecContext(context.Background(),
+			`UPDATE channel_chat_timer SET config = jsonb_set(config, '{enabled}', to_jsonb($2::boolean)) WHERE channel_id = $1`,
+			s.channelID, enabled); err != nil {
+			return err
+		}
+	}
 	for _, timer := range s.timers {
 		timer.Enabled = enabled
 	}
@@ -141,22 +188,40 @@ func (s *Service) Upsert(timer Timer) (Timer, error) {
 
 	timer.LastFiredAt = s.now()
 
+	if s.db != nil {
+		raw, err := json.Marshal(timer)
+		if err != nil {
+			return Timer{}, err
+		}
+		if _, err := s.db.ExecContext(context.Background(), `
+			INSERT INTO channel_chat_timer (channel_id, id, config) VALUES ($1, $2, $3)
+			ON CONFLICT (channel_id, id) DO UPDATE SET config = EXCLUDED.config`,
+			s.channelID, timer.ID, string(raw)); err != nil {
+			return Timer{}, err
+		}
+	}
 	s.timers[timer.ID] = &timer
 
 	return timer, nil
 }
 
-func (s *Service) Delete(id string) bool {
+func (s *Service) Delete(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, ok := s.timers[id]; !ok {
-		return false
+		return false, nil
 	}
 
+	if s.db != nil {
+		if _, err := s.db.ExecContext(context.Background(),
+			`DELETE FROM channel_chat_timer WHERE channel_id = $1 AND id = $2`, s.channelID, id); err != nil {
+			return false, err
+		}
+	}
 	delete(s.timers, id)
 
-	return true
+	return true, nil
 }
 
 // SetChannel запоминает канал для $(channel)-переменных.
@@ -249,8 +314,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/timers", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/timers", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, map[string]any{"timers": service.List()})
 
@@ -281,14 +353,19 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, saved)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/timers/{id}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/timers/{id}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodDelete {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
 			return
 		}
 
-		if !service.Delete(request.PathValue("id")) {
+		deleted, err := service.Delete(request.PathValue("id"))
+		if err != nil {
+			http.Error(response, "timer delete failed", http.StatusInternalServerError)
+			return
+		}
+		if !deleted {
 			writeJSON(response, http.StatusNotFound, map[string]string{"error": "timer not found"})
 
 			return

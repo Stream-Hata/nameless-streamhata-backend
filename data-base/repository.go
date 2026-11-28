@@ -7,13 +7,12 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/p7x-dev/nameless-streamhata-backend/migrations"
 )
 
 type Where struct {
@@ -146,8 +145,23 @@ func scanStruct[T any](rows *sql.Rows) (T, error) {
 	if err := rows.Scan(dest...); err != nil {
 		return result, err
 	}
+	if token, ok := any(&result).(interface{ DecryptAfterLoad() error }); ok {
+		if err := token.DecryptAfterLoad(); err != nil {
+			return result, err
+		}
+	}
 
 	return result, rows.Err()
+}
+
+func encryptForStorage[T any](data T) (T, error) {
+	if token, ok := any(&data).(interface{ EncryptForStorage() error }); ok {
+		if err := token.EncryptForStorage(); err != nil {
+			return data, err
+		}
+	}
+
+	return data, nil
 }
 
 type Database[T comparable] interface {
@@ -237,6 +251,10 @@ func Migrate() error {
 		_ = db.Close()
 	}()
 
+	return applyMigrations(db)
+}
+
+func applyMigrations(db *sql.DB) error {
 	const migrationLockKey int64 = 0x53545245414d
 
 	lockConnection, err := db.Conn(context.Background())
@@ -281,21 +299,17 @@ func Migrate() error {
 		applied[name] = true
 	}
 
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
 	_ = rows.Close()
 
-	migrationsPath, err := filepath.Abs("migrations")
+	// ReadDir returns entries in filename order.
+	entries, err := migrations.Files.ReadDir(".")
 	if err != nil {
 		return err
 	}
-
-	entries, err := os.ReadDir(migrationsPath)
-	if err != nil {
-		return err
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
 
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
@@ -308,7 +322,7 @@ func Migrate() error {
 			continue
 		}
 
-		body, err := os.ReadFile(filepath.Join(migrationsPath, entry.Name()))
+		body, err := migrations.Files.ReadFile(entry.Name())
 		if err != nil {
 			return err
 		}
@@ -343,6 +357,11 @@ func Migrate() error {
 }
 
 func (db *database[T]) Insert(data T) (*T, error) {
+	data, err := encryptForStorage(data)
+	if err != nil {
+		return nil, err
+	}
+
 	tx, err := db.db.BeginTx(db.ctx, &sql.TxOptions{Isolation: sql.LevelReadUncommitted})
 	if err != nil {
 		return nil, err
@@ -385,6 +404,11 @@ func (db *database[T]) Insert(data T) (*T, error) {
 }
 
 func (db *database[T]) Update(data T) (*T, error) {
+	data, err := encryptForStorage(data)
+	if err != nil {
+		return nil, err
+	}
+
 	tx, err := db.db.BeginTx(db.ctx, &sql.TxOptions{Isolation: sql.LevelReadUncommitted})
 	if err != nil {
 		return nil, err

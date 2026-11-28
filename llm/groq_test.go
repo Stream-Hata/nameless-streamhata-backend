@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestRussianKeyboardReading(t *testing.T) {
+	for input, want := range map[string]string{
+		"ujdyj":    "говно",
+		"GJT<TYM":  "ПОЕБЕНЬ",
+		",kzlm":    "блядь",
+		"[jxe 🎮":   "хочу 🎮",
+		"привет 🎮": "привет 🎮",
+	} {
+		if got := russianKeyboardReading(input); got != want {
+			t.Errorf("russianKeyboardReading(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestParseClassificationPlainJSON(t *testing.T) {
 	result := parseClassification(`{"is_advice":true,"confidence":0.95}`)
 

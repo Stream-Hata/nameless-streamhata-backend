@@ -23,19 +23,25 @@ type Config struct {
 }
 
 type Service struct {
-	mu     sync.Mutex
-	config Config
-	seen   map[string]bool
-	db     *sql.DB
-	writer chat.Writer
+	mu        sync.Mutex
+	config    Config
+	seen      map[string]bool
+	db        *sql.DB
+	channelID string
+	writer    chat.Writer
 }
 
 func New(db *sql.DB, writer chat.Writer) *Service {
+	return NewForChannel(db, writer, "")
+}
+
+func NewForChannel(db *sql.DB, writer chat.Writer, channelID string) *Service {
 	service := &Service{
-		config: Config{Enabled: true, Messages: []string{"@{user}, добро пожаловать на стрим!"}},
-		seen:   make(map[string]bool),
-		db:     db,
-		writer: writer,
+		config:    Config{Enabled: true, Messages: []string{"@{user}, добро пожаловать на стрим!"}},
+		seen:      make(map[string]bool),
+		db:        db,
+		channelID: channelID,
+		writer:    writer,
 	}
 	service.load()
 
@@ -94,13 +100,20 @@ func (s *Service) HandleMessage(message twitch.TwitchChatMessage) {
 	_ = s.writer.Say(text)
 }
 
+func (s *Service) scopedKey(key string) string {
+	if s.channelID == "" {
+		return key
+	}
+	return key + ":" + s.channelID
+}
+
 func (s *Service) load() {
 	if s.db == nil {
 		return
 	}
 
 	var raw []byte
-	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = $1`, storageKey).Scan(&raw); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = $1`, s.scopedKey(storageKey)).Scan(&raw); err != nil {
 		return
 	}
 
@@ -124,15 +137,22 @@ func (s *Service) persist() {
 	}
 
 	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ($1, $2)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, storageKey, string(raw))
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, s.scopedKey(storageKey), string(raw))
 }
 
 type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/welcome", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/welcome", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, service.Config())
 

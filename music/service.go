@@ -17,7 +17,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/p7x-dev/nameless-streamhata-backend/media"
 	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 )
 
@@ -57,6 +59,13 @@ type Stats struct {
 	UniqueAuthors int `json:"uniqueAuthors"`
 }
 
+type StreamerPlaylist struct {
+	SourceURL    string  `json:"sourceUrl"`
+	Title        string  `json:"title"`
+	Tracks       []Track `json:"tracks"`
+	CurrentIndex int     `json:"currentIndex"`
+}
+
 // Service — трек-лист стрима: парсит ссылки из чата, хранит и экспортирует.
 type Service struct {
 	mu      sync.RWMutex
@@ -65,23 +74,304 @@ type Service struct {
 	enabled bool
 
 	db           *sql.DB
+	channelID    string
+	streamerList StreamerPlaylist
+	favorites    map[string]Track
 	fetcher      Fetcher
 	telegram     TelegramSender
 	telegramPage TelegramPageSender
 }
 
 func NewService(db *sql.DB) *Service {
+	return NewForChannel(db, "")
+}
+
+func NewForChannel(db *sql.DB, channelID string) *Service {
 	service := &Service{
-		tracks:  make(map[string]*Track),
-		enabled: true,
-		db:      db,
-		fetcher: FetchVideoMeta,
+		tracks:       make(map[string]*Track),
+		enabled:      true,
+		db:           db,
+		channelID:    channelID,
+		streamerList: StreamerPlaylist{Tracks: []Track{}},
+		favorites:    make(map[string]Track),
+		fetcher:      FetchVideoMeta,
 	}
 
 	service.loadFromDB()
 	service.loadCurrent()
+	service.loadStreamerPlaylist()
+	service.loadFavorites()
 
 	return service
+}
+
+func (s *Service) StreamerPlaylist() StreamerPlaylist {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	playlist := s.streamerList
+	playlist.Tracks = append([]Track(nil), playlist.Tracks...)
+	return playlist
+}
+
+// SetStreamerPlaylistIndex persists the index of the streamer track currently
+// playing so a widget reload or a viewer request won't reset the playlist.
+func (s *Service) SetStreamerPlaylistIndex(index int) int {
+	s.mu.Lock()
+	if len(s.streamerList.Tracks) == 0 {
+		index = 0
+	} else {
+		index = index % len(s.streamerList.Tracks)
+		if index < 0 {
+			index += len(s.streamerList.Tracks)
+		}
+	}
+	s.streamerList.CurrentIndex = index
+	snapshot := s.streamerList
+	s.mu.Unlock()
+	s.persistStreamerPlaylist(snapshot)
+	return index
+}
+
+func (s *Service) ImportStreamerPlaylist(ctx context.Context, playlistURL string) (StreamerPlaylist, error) {
+	var playlist StreamerPlaylist
+	if _, err := parseYandexPlaylistURL(playlistURL); err == nil {
+		playlist, err = FetchYandexPlaylist(ctx, playlistURL)
+		if err != nil {
+			return StreamerPlaylist{}, err
+		}
+	} else {
+		fetched, fetchErr := media.FetchYouTubePlaylist(ctx, playlistURL)
+		if fetchErr != nil {
+			return StreamerPlaylist{}, fetchErr
+		}
+		playlist = StreamerPlaylist{SourceURL: fetched.SourceURL, Title: fetched.Title, Tracks: make([]Track, 0, len(fetched.Tracks))}
+		for _, item := range fetched.Tracks {
+			playlist.Tracks = append(playlist.Tracks, Track{VideoID: item.VideoID, Kind: "youtube", URL: item.URL, Title: item.Title, Author: item.Author, DurationSeconds: item.DurationSeconds, Thumbnail: item.Thumbnail, Links: buildLinks(item.VideoID, item.URL), FirstAddedAt: time.Now().UTC(), LastAddedAt: time.Now().UTC(), TimesAdded: 1})
+		}
+	}
+	s.mu.Lock()
+	known := make(map[string]struct{}, len(s.streamerList.Tracks))
+	tracks := append([]Track(nil), s.streamerList.Tracks...)
+	for _, track := range tracks {
+		known[track.VideoID] = struct{}{}
+	}
+	for _, track := range playlist.Tracks {
+		if _, exists := known[track.VideoID]; exists {
+			continue
+		}
+		known[track.VideoID] = struct{}{}
+		tracks = append(tracks, track)
+	}
+	index := s.streamerList.CurrentIndex
+	if len(tracks) == 0 || index >= len(tracks) {
+		index = 0
+	}
+	s.streamerList = StreamerPlaylist{SourceURL: playlist.SourceURL, Title: playlist.Title, Tracks: tracks, CurrentIndex: index}
+	snapshot := s.streamerList
+	s.mu.Unlock()
+	s.persistStreamerPlaylist(snapshot)
+	return snapshot, nil
+}
+
+func (s *Service) AddStreamerTrack(ctx context.Context, rawURL string) (StreamerPlaylist, error) {
+	var track Track
+	if videoID, ok := ExtractVideoID(rawURL); ok {
+		meta, err := s.fetcher(ctx, videoID)
+		if err != nil {
+			return StreamerPlaylist{}, err
+		}
+		track = Track{VideoID: videoID, Kind: "youtube", URL: "https://www.youtube.com/watch?v=" + videoID, Title: meta.Title, Author: meta.Author, Album: meta.Album, Year: meta.Year, DurationSeconds: meta.DurationSeconds, Thumbnail: meta.Thumbnail, Links: buildLinks(videoID, "https://www.youtube.com/watch?v="+videoID), TimesAdded: 1}
+	} else if mediaURL, kind, ok := ExtractLink(rawURL); ok && kind != "youtube" {
+		sum := sha1.Sum([]byte(mediaURL))
+		id := "media-" + hex.EncodeToString(sum[:])[:16]
+		track = Track{VideoID: id, Kind: kind, URL: mediaURL, Title: path.Base(strings.Split(mediaURL, "?")[0]), Author: "media", Links: []string{mediaURL}, TimesAdded: 1}
+	} else {
+		return StreamerPlaylist{}, errors.New("music: добавьте ссылку на YouTube-трек или аудиофайл")
+	}
+	if track.Title == "" || track.Title == "." || track.Title == "/" {
+		track.Title = track.URL
+	}
+	now := time.Now().UTC()
+	track.FirstAddedAt = now
+	track.LastAddedAt = now
+	s.mu.Lock()
+	for _, current := range s.streamerList.Tracks {
+		if current.VideoID == track.VideoID {
+			snapshot := s.streamerList
+			s.mu.Unlock()
+			return snapshot, nil
+		}
+	}
+	s.streamerList.Tracks = append(s.streamerList.Tracks, track)
+	snapshot := s.streamerList
+	s.mu.Unlock()
+	s.persistStreamerPlaylist(snapshot)
+	return snapshot, nil
+}
+
+func (s *Service) RemoveStreamerTrack(videoID string) bool {
+	s.mu.Lock()
+	tracks := s.streamerList.Tracks
+	filtered := make([]Track, 0, len(tracks))
+	found := false
+	removedIndex := -1
+	for index, track := range tracks {
+		if track.VideoID == videoID {
+			found = true
+			removedIndex = index
+			continue
+		}
+		filtered = append(filtered, track)
+	}
+	if found {
+		s.streamerList.Tracks = filtered
+		if removedIndex < s.streamerList.CurrentIndex {
+			s.streamerList.CurrentIndex--
+		}
+		if len(filtered) == 0 || s.streamerList.CurrentIndex >= len(filtered) {
+			s.streamerList.CurrentIndex = 0
+		}
+	}
+	snapshot := s.streamerList
+	s.mu.Unlock()
+	if found {
+		s.persistStreamerPlaylist(snapshot)
+	}
+	return found
+}
+
+func (s *Service) Favorites() []Track {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]Track, 0, len(s.favorites))
+	for _, track := range s.favorites {
+		result = append(result, track)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Title < result[j].Title })
+	return result
+}
+
+func (s *Service) SetFavorite(track Track, favorite bool) error {
+	if track.VideoID == "" {
+		return errors.New("music: invalid favorite track")
+	}
+	s.mu.Lock()
+	if favorite {
+		s.favorites[track.VideoID] = track
+	} else {
+		delete(s.favorites, track.VideoID)
+	}
+	s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	if !favorite {
+		_, err := s.db.ExecContext(context.Background(), `DELETE FROM streamer_music_favorite WHERE channel_id=$1 AND video_id=$2`, s.channelID, track.VideoID)
+		return err
+	}
+	raw, err := json.Marshal(track)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(context.Background(), `INSERT INTO streamer_music_favorite(channel_id,video_id,track) VALUES($1,$2,$3) ON CONFLICT(channel_id,video_id) DO UPDATE SET track=EXCLUDED.track`, s.channelID, track.VideoID, raw)
+	return err
+}
+
+func (s *Service) SetFavoriteByID(videoID string, favorite bool) error {
+	if videoID == "" {
+		return errors.New("music: invalid favorite track")
+	}
+	if !favorite {
+		s.mu.Lock()
+		delete(s.favorites, videoID)
+		s.mu.Unlock()
+		if s.db == nil {
+			return nil
+		}
+		_, err := s.db.ExecContext(context.Background(), `DELETE FROM streamer_music_favorite WHERE channel_id=$1 AND video_id=$2`, s.channelID, videoID)
+		return err
+	}
+	s.mu.RLock()
+	track, ok := s.tracks[videoID]
+	if !ok {
+		for _, item := range s.streamerList.Tracks {
+			if item.VideoID == videoID {
+				track = &item
+				ok = true
+				break
+			}
+		}
+	}
+	var snapshot Track
+	if ok {
+		snapshot = *track
+	}
+	s.mu.RUnlock()
+	if !ok {
+		return errors.New("music: track not found")
+	}
+	return s.SetFavorite(snapshot, favorite)
+}
+
+func (s *Service) IsFavorite(videoID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.favorites[videoID]
+	return ok
+}
+
+func (s *Service) persistStreamerPlaylist(playlist StreamerPlaylist) {
+	if s.db == nil {
+		return
+	}
+	raw, err := json.Marshal(playlist.Tracks)
+	if err != nil {
+		return
+	}
+	_, err = s.db.ExecContext(context.Background(), `INSERT INTO streamer_music_playlist(channel_id,source_url,title,tracks,current_index) VALUES($1,$2,$3,$4,$5) ON CONFLICT(channel_id) DO UPDATE SET source_url=EXCLUDED.source_url,title=EXCLUDED.title,tracks=EXCLUDED.tracks,current_index=EXCLUDED.current_index,updated_at=now()`, s.channelID, playlist.SourceURL, playlist.Title, raw, playlist.CurrentIndex)
+	if err != nil {
+		log.Printf("[Music] streamer playlist persist failed: %v", err)
+	}
+}
+
+func (s *Service) loadStreamerPlaylist() {
+	if s.db == nil {
+		return
+	}
+	var sourceURL, title string
+	var raw []byte
+	var currentIndex int
+	if err := s.db.QueryRowContext(context.Background(), `SELECT source_url,title,tracks,current_index FROM streamer_music_playlist WHERE channel_id=$1`, s.channelID).Scan(&sourceURL, &title, &raw, &currentIndex); err != nil {
+		return
+	}
+	var tracks []Track
+	if json.Unmarshal(raw, &tracks) != nil {
+		return
+	}
+	s.mu.Lock()
+	if len(tracks) == 0 || currentIndex < 0 || currentIndex >= len(tracks) {
+		currentIndex = 0
+	}
+	s.streamerList = StreamerPlaylist{SourceURL: sourceURL, Title: title, Tracks: tracks, CurrentIndex: currentIndex}
+	s.mu.Unlock()
+}
+
+func (s *Service) loadFavorites() {
+	if s.db == nil {
+		return
+	}
+	rows, err := s.db.QueryContext(context.Background(), `SELECT track FROM streamer_music_favorite WHERE channel_id=$1`, s.channelID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		var track Track
+		if rows.Scan(&raw) == nil && json.Unmarshal(raw, &track) == nil {
+			s.favorites[track.VideoID] = track
+		}
+	}
 }
 
 func (s *Service) ID() string {
@@ -223,13 +513,20 @@ func (s *Service) SetCurrent(videoID string) {
 	}
 }
 
+func (s *Service) currentKey() string {
+	if s.channelID == "" {
+		return "music_current"
+	}
+	return "music_current:" + s.channelID
+}
+
 func (s *Service) loadCurrent() {
 	if s.db == nil {
 		return
 	}
 
 	var raw []byte
-	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'music_current'`).Scan(&raw); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = $1`, s.currentKey()).Scan(&raw); err != nil {
 		return
 	}
 
@@ -252,8 +549,8 @@ func (s *Service) persistCurrentLocked() {
 	if err != nil {
 		return
 	}
-	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ('music_current', $1)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, string(raw))
+	_, _ = s.db.ExecContext(context.Background(), `INSERT INTO app_setting (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, s.currentKey(), string(raw))
 }
 
 // Current возвращает текущий трек, если он ещё есть в списке.
@@ -330,6 +627,99 @@ func (s *Service) Add(ctx context.Context, videoID, url string, addedBy string) 
 	return &snapshot, nil
 }
 
+// QueueByTitle places a known song title into today's playback queue.
+// A track already queued today keeps its position instead of being duplicated.
+func (s *Service) QueueByTitle(title, addedBy string) (Track, int, bool) {
+	wanted := normalizeTrackTitle(title)
+	if len([]rune(wanted)) < 4 {
+		return Track{}, 0, false
+	}
+
+	now := time.Now().UTC()
+	s.mu.Lock()
+	var selected *Track
+	for _, track := range s.tracks {
+		if normalizeTrackTitle(track.Title) == wanted {
+			selected = track
+			break
+		}
+	}
+	if selected == nil {
+		s.mu.Unlock()
+		return Track{}, 0, false
+	}
+
+	if selected.LastAddedAt.In(time.Local).Format("2006-01-02") != now.In(time.Local).Format("2006-01-02") {
+		selected.LastAddedAt = now
+		selected.TimesAdded++
+		if addedBy != "" {
+			selected.AddedBy = addedBy
+		}
+	}
+
+	queued := make([]*Track, 0, len(s.tracks))
+	today := now.In(time.Local).Format("2006-01-02")
+	for _, track := range s.tracks {
+		if track.LastAddedAt.In(time.Local).Format("2006-01-02") == today {
+			queued = append(queued, track)
+		}
+	}
+	sort.Slice(queued, func(i, j int) bool {
+		if queued[i].LastAddedAt.Equal(queued[j].LastAddedAt) {
+			return queued[i].VideoID < queued[j].VideoID
+		}
+		return queued[i].LastAddedAt.Before(queued[j].LastAddedAt)
+	})
+	position := 0
+	for index, track := range queued {
+		if track.VideoID == selected.VideoID {
+			position = index + 1
+			break
+		}
+	}
+	snapshot := *selected
+	s.mu.Unlock()
+
+	s.persist(snapshot)
+	return snapshot, position, true
+}
+
+// SearchAndQueue looks up a requested song title and adds its first playable
+// YouTube result to today's queue.
+func (s *Service) SearchAndQueue(ctx context.Context, query, addedBy string) (Track, int, error) {
+	sources, err := media.SearchAudio(ctx, query, "", "")
+	if err != nil {
+		return Track{}, 0, err
+	}
+	for _, source := range sources {
+		if track, position, matched := s.QueueByTitle(source.Title, addedBy); matched {
+			return track, position, nil
+		}
+		videoID, ok := ExtractVideoID(source.URL)
+		if !ok {
+			continue
+		}
+		track, err := s.Add(ctx, videoID, source.URL, addedBy)
+		if err != nil {
+			continue
+		}
+		if queuedTrack, position, matched := s.QueueByTitle(track.Title, addedBy); matched {
+			return queuedTrack, position, nil
+		}
+	}
+	return Track{}, 0, errors.New("не удалось добавить найденную песню в очередь")
+}
+
+func normalizeTrackTitle(title string) string {
+	var normalized strings.Builder
+	for _, character := range strings.ToLower(strings.TrimSpace(title)) {
+		if unicode.IsLetter(character) || unicode.IsNumber(character) {
+			normalized.WriteRune(character)
+		}
+	}
+	return normalized.String()
+}
+
 func (s *Service) List() []Track {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -360,7 +750,7 @@ func (s *Service) Delete(videoID string) bool {
 	s.mu.Unlock()
 
 	if s.db != nil {
-		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM track WHERE video_id = $1`, videoID)
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM track WHERE channel_id = $1 AND video_id = $2`, s.channelID, videoID)
 	}
 
 	return true
@@ -426,9 +816,9 @@ func (s *Service) persist(track Track) {
 	query := `
 		INSERT INTO track (
 			video_id, url, title, author, album, year, duration_seconds, thumbnail, added_by,
-			first_added_at, last_added_at, times_added
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		ON CONFLICT (video_id) DO UPDATE SET
+			first_added_at, last_added_at, times_added, channel_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		ON CONFLICT (channel_id, video_id) DO UPDATE SET
 			title = EXCLUDED.title,
 			author = EXCLUDED.author,
 			album = EXCLUDED.album,
@@ -453,6 +843,7 @@ func (s *Service) persist(track Track) {
 		track.FirstAddedAt,
 		track.LastAddedAt,
 		track.TimesAdded,
+		s.channelID,
 	)
 	if err != nil {
 		log.Printf("[Music] persist failed: %v", err)
@@ -468,7 +859,7 @@ func (s *Service) loadFromDB() {
 		context.Background(),
 		`SELECT video_id, url, title, author, album, year, duration_seconds, thumbnail, added_by,
 		        first_added_at, last_added_at, times_added
-		 FROM track ORDER BY last_added_at DESC`,
+		 FROM track WHERE channel_id = $1 ORDER BY last_added_at DESC`, s.channelID,
 	)
 	if err != nil {
 		log.Printf("[Music] load failed: %v", err)

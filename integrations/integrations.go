@@ -66,16 +66,18 @@ func (r *Registry) List() []Item {
 	return list
 }
 
-func (r *Registry) SetEnabled(id string, enabled bool) (Item, bool) {
+func (r *Registry) SetEnabled(id string, enabled bool) (Item, bool, error) {
 	r.mu.RLock()
 	component, ok := r.items[id]
 	r.mu.RUnlock()
 
 	if !ok {
-		return Item{}, false
+		return Item{}, false, nil
 	}
 
-	_ = component.SetEnabled(enabled)
+	if err := component.SetEnabled(enabled); err != nil {
+		return Item{}, true, err
+	}
 
 	return Item{
 		ID:      component.ID(),
@@ -83,7 +85,7 @@ func (r *Registry) SetEnabled(id string, enabled bool) (Item, bool) {
 		Kind:    component.Kind(),
 		Enabled: component.Enabled(),
 		Status:  component.Status(),
-	}, true
+	}, true, nil
 }
 
 // Deps — минимальный контракт сервера.
@@ -91,7 +93,7 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, registry *Registry) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Registry) {
 	srv.ServeEndpoint("/rgg-sync/integrations", func(
 		response http.ResponseWriter,
 		request *http.Request,
@@ -99,6 +101,10 @@ func RegisterRoutes(srv Deps, registry *Registry) {
 		if request.Method != http.MethodGet {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
+			return
+		}
+		registry := resolve(response, request)
+		if registry == nil {
 			return
 		}
 
@@ -116,6 +122,10 @@ func RegisterRoutes(srv Deps, registry *Registry) {
 
 			return
 		}
+		registry := resolve(response, request)
+		if registry == nil {
+			return
+		}
 
 		var body struct {
 			Enabled bool `json:"enabled"`
@@ -127,7 +137,11 @@ func RegisterRoutes(srv Deps, registry *Registry) {
 			return
 		}
 
-		item, ok := registry.SetEnabled(request.PathValue("id"), body.Enabled)
+		item, ok, err := registry.SetEnabled(request.PathValue("id"), body.Enabled)
+		if err != nil {
+			writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
 
 		if !ok {
 			writeJSON(response, http.StatusNotFound, map[string]string{"error": "unknown integration"})

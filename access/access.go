@@ -7,8 +7,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+
+	data_base "github.com/p7x-dev/nameless-streamhata-backend/data-base"
+	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 )
 
 const storageKey = "access_roles"
@@ -21,13 +25,17 @@ type Roles struct {
 }
 
 type Service struct {
-	mu    sync.RWMutex
-	roles Roles
-	db    *sql.DB
+	mu               sync.RWMutex
+	roles            Roles
+	db               *sql.DB
+	sessions         *twitch.Sessions
+	appOwnerLogin    string
+	appOwnerTwitchID string
 }
 
-func New(db *sql.DB) *Service {
-	service := &Service{db: db, roles: defaultRoles()}
+func New(db *sql.DB, sessions *twitch.Sessions) *Service {
+	service := &Service{db: db, roles: defaultRoles(), sessions: sessions, appOwnerLogin: configuredApplicationOwner()}
+	service.loadApplicationOwnerIdentity()
 	service.load()
 
 	return service
@@ -55,6 +63,13 @@ func defaultRoles() Roles {
 
 func normalize(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
+}
+
+func configuredApplicationOwner() string {
+	if login := normalize(os.Getenv("OWNER_LOGIN")); login != "" {
+		return login
+	}
+	return "grep_ban"
 }
 
 func (s *Service) Get() Roles {
@@ -113,7 +128,7 @@ func (s *Service) Role(login string) string {
 	defer s.mu.RUnlock()
 
 	switch {
-	case contains(s.roles.Owners, login):
+	case login != "" && login == s.appOwnerLogin:
 		return "owner"
 	case contains(s.roles.Admins, login):
 		return "admin"
@@ -122,12 +137,41 @@ func (s *Service) Role(login string) string {
 	case contains(s.roles.Vips, login):
 		return "vip"
 	default:
+		if login != "" {
+			return "streamer"
+		}
 		return "viewer"
 	}
 }
 
 func (s *Service) IsOwner(login string) bool {
-	return s.Role(login) == "owner"
+	login = normalize(login)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return login != "" && login == s.appOwnerLogin
+}
+
+// IsApplicationOwner is reserved for app-wide configuration such as shared
+// provider credentials. Channel-level role assignments must not grant it.
+func (s *Service) IsApplicationOwner(login, twitchUserID string) bool {
+	login = normalize(login)
+	twitchUserID = strings.TrimSpace(twitchUserID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if login == "" || twitchUserID == "" {
+		return false
+	}
+	if s.appOwnerTwitchID == "" {
+		if login != s.appOwnerLogin {
+			return false
+		}
+		s.appOwnerTwitchID = twitchUserID
+	} else if s.appOwnerTwitchID != twitchUserID {
+		return false
+	}
+	s.appOwnerLogin = login
+	s.persistApplicationOwnerIdentityLocked()
+	return true
 }
 
 func (s *Service) IsAdmin(login string) bool {
@@ -177,6 +221,53 @@ func (s *Service) load() {
 		}
 		s.roles = clean(roles)
 	}
+}
+
+type applicationOwnerIdentity struct {
+	Login        string `json:"login"`
+	TwitchUserID string `json:"twitch_user_id"`
+}
+
+func (s *Service) loadApplicationOwnerIdentity() {
+	if s.db == nil {
+		return
+	}
+	var raw []byte
+	err := s.db.QueryRowContext(context.Background(), `SELECT value FROM app_setting WHERE key = 'application_owner_identity'`).Scan(&raw)
+	if err == nil {
+		var identity applicationOwnerIdentity
+		if json.Unmarshal(raw, &identity) == nil && strings.TrimSpace(identity.TwitchUserID) != "" {
+			s.appOwnerTwitchID = strings.TrimSpace(identity.TwitchUserID)
+			if login := normalize(identity.Login); login != "" {
+				s.appOwnerLogin = login
+			}
+			return
+		}
+	}
+
+	// Bootstrap the stable Twitch ID from the current configured login. Once
+	// stored, all authorization uses the immutable Twitch ID across renames.
+	var twitchUserID int64
+	if err := s.db.QueryRowContext(context.Background(), `
+		SELECT twitch_user_id FROM users WHERE lower(username) = $1 AND twitch_user_id > 0 ORDER BY id LIMIT 1
+	`, s.appOwnerLogin).Scan(&twitchUserID); err == nil {
+		s.appOwnerTwitchID = strconv.FormatInt(twitchUserID, 10)
+		s.persistApplicationOwnerIdentityLocked()
+	}
+}
+
+func (s *Service) persistApplicationOwnerIdentityLocked() {
+	if s.db == nil || s.appOwnerTwitchID == "" || s.appOwnerLogin == "" {
+		return
+	}
+	raw, err := json.Marshal(applicationOwnerIdentity{Login: s.appOwnerLogin, TwitchUserID: s.appOwnerTwitchID})
+	if err != nil {
+		return
+	}
+	_, _ = s.db.ExecContext(context.Background(), `
+		INSERT INTO app_setting (key, value) VALUES ('application_owner_identity', $1::jsonb)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+	`, string(raw))
 }
 
 func (s *Service) persist() {
@@ -261,6 +352,13 @@ type Deps interface {
 }
 
 func (s *Service) LoginFromRequest(request *http.Request) string {
+	if s.sessions != nil {
+		user, _, err := s.sessions.Account(request)
+		if err != nil {
+			return ""
+		}
+		return normalize(user.Username)
+	}
 	if s.db == nil {
 		return ""
 	}
@@ -269,13 +367,17 @@ func (s *Service) LoginFromRequest(request *http.Request) string {
 	if err != nil || cookie.Value == "" {
 		return ""
 	}
+	digest, err := data_base.RefreshTokenDigest(cookie.Value)
+	if err != nil {
+		return ""
+	}
 
 	var login string
 
 	err = s.db.QueryRowContext(
 		context.Background(),
-		`SELECT u.username FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.refresh_token = $1 LIMIT 1`,
-		cookie.Value,
+		`SELECT u.username FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.refresh_token_hash = $1 LIMIT 1`,
+		digest,
 	).Scan(&login)
 	if err != nil {
 		return ""

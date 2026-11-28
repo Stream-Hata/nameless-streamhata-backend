@@ -13,8 +13,12 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) (*Service, string)) {
 	srv.ServeEndpoint("/rgg-sync/chat/recent", func(response http.ResponseWriter, request *http.Request) {
+		service, channelID := resolve(response, request)
+		if service == nil {
+			return
+		}
 		limit := 100
 
 		if raw := request.URL.Query().Get("limit"); raw != "" {
@@ -23,8 +27,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 			}
 		}
 
-		mode := request.URL.Query().Get("mode")
-		messages := service.RecentMode(limit, mode)
+		messages := service.RecentChannel(limit, channelID)
 		filtered := messages[:0]
 
 		for _, message := range messages {

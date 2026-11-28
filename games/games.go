@@ -846,8 +846,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/games", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/games", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPatch || request.Method == http.MethodPost {
 			var settings Settings
 
@@ -865,11 +872,11 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, service.GetSettings())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/games/last", func(response http.ResponseWriter, _ *http.Request) {
+	serve("/rgg-sync/games/last", func(service *Service, response http.ResponseWriter, _ *http.Request) {
 		writeJSON(response, http.StatusOK, service.GetLastResult())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/games/wheel", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/games/wheel", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			writeJSON(response, http.StatusOK, service.GetWheelState())
 
@@ -879,7 +886,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/games/wheel/start", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/games/wheel/start", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -921,7 +928,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, round)
 	})
 
-	srv.ServeEndpoint("/rgg-sync/games/wheel/entry", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/games/wheel/entry", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -951,7 +958,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, service.GetWheelState())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/games/wheel/boost", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/games/wheel/boost", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -982,7 +989,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/games/wheel/entry/{userId}", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/games/wheel/entry/{userId}", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodDelete {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -998,7 +1005,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, service.GetWheelState())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/games/wheel/refund", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/games/wheel/refund", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -1014,7 +1021,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, service.GetWheelState())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/games/wheel/reset", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/games/wheel/reset", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
@@ -1025,7 +1032,7 @@ func RegisterRoutes(srv Deps, service *Service) {
 		writeJSON(response, http.StatusOK, service.GetWheelState())
 	})
 
-	srv.ServeEndpoint("/rgg-sync/games/wheel/spin", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/games/wheel/spin", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 

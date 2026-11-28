@@ -86,38 +86,7 @@ type Fetcher func(ctx context.Context, videoID string) (*VideoMeta, error)
 
 // FetchVideoMeta парсит страницу ролика YouTube (ytInitialPlayerResponse).
 func FetchVideoMeta(ctx context.Context, videoID string) (*VideoMeta, error) {
-	request, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		"https://www.youtube.com/watch?v="+videoID+"&hl=ru",
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	request.Header.Set(
-		"User-Agent",
-		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-	)
-	request.Header.Set("Accept-Language", "ru,en;q=0.8")
-
-	client := netcfg.NewHTTPClient(15 * time.Second)
-
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		_ = response.Body.Close()
-	}()
-
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("youtube: watch page returned %d", response.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	body, err := fetchYouTubeWatchPage(ctx, videoID)
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +155,52 @@ func FetchVideoMeta(ctx context.Context, videoID string) (*VideoMeta, error) {
 	}
 
 	return meta, nil
+}
+
+func fetchYouTubeWatchPage(ctx context.Context, videoID string) ([]byte, error) {
+	url := "https://www.youtube.com/watch?v=" + videoID + "&hl=ru"
+	requestPage := func(requestCtx context.Context, client *http.Client) ([]byte, int, error) {
+		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		request.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+		request.Header.Set("Accept-Language", "ru,en;q=0.8")
+		response, err := client.Do(request)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+		return body, response.StatusCode, err
+	}
+
+	settings := netcfg.Default().Get()
+	if settings.Enabled && settings.ProxyURL != "" {
+		proxyCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		body, status, err := requestPage(proxyCtx, netcfg.NewHTTPClient(15*time.Second))
+		cancel()
+		if err == nil && status == http.StatusOK {
+			return body, nil
+		}
+	}
+
+	directClient := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			Proxy:                 nil,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 15 * time.Second,
+		},
+	}
+	body, status, err := requestPage(ctx, directClient)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("youtube: watch page returned %d", status)
+	}
+	return body, nil
 }
 
 // parseYear выделяет год из publishDate/«Released on».

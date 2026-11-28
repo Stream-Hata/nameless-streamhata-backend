@@ -25,6 +25,7 @@ import (
 
 	data_base "github.com/p7x-dev/nameless-streamhata-backend/data-base"
 	"github.com/p7x-dev/nameless-streamhata-backend/netcfg"
+	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 	"github.com/p7x-dev/nameless-streamhata-backend/vaultsecrets"
 )
 
@@ -110,6 +111,7 @@ type Service struct {
 	watchMu         sync.Mutex
 	issueSnapshots  map[string]issueSnapshot
 	http            *http.Client
+	monitoringHTTP  *http.Client
 	lokiURL         string
 	prometheusURL   string
 }
@@ -123,6 +125,7 @@ func New(db *sql.DB, users data_base.Database[data_base.User], tokens data_base.
 		lastSeen:       make(map[string]time.Time),
 		issueSnapshots: make(map[string]issueSnapshot),
 		http:           newHTTPClient(),
+		monitoringHTTP: netcfg.NewDirectHTTPClient(20 * time.Second),
 		lokiURL:        envOr("LOKI_URL", "http://127.0.0.1:3100"),
 		prometheusURL:  envOr("PROMETHEUS_URL", "http://127.0.0.1:9090"),
 	}
@@ -338,15 +341,32 @@ func (s *Service) sessionUser(request *http.Request) (*data_base.User, error) {
 	if s.users == nil || s.tokens == nil {
 		return nil, errUnauthorized
 	}
+	if id, present, err := twitch.BrowserSessionUserID(s.db, request); present {
+		if err != nil {
+			return nil, errUnauthorized
+		}
+		user, err := s.users.Find(data_base.Where{Column: "id", Value: id})
+		if err != nil || user == nil {
+			return nil, errUnauthorized
+		}
+		if user.Banned {
+			return nil, errForbidden
+		}
+		return user, nil
+	}
 
 	cookie, err := request.Cookie("e-hub-refresh-token")
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
 		return nil, errUnauthorized
 	}
+	digest, err := data_base.RefreshTokenDigest(cookie.Value)
+	if err != nil {
+		return nil, errUnauthorized
+	}
 
 	token, err := s.tokens.Find(data_base.Where{
-		Column: "refresh_token",
-		Value:  cookie.Value,
+		Column: "refresh_token_hash",
+		Value:  digest,
 	})
 	if err != nil || token == nil {
 		return nil, errUnauthorized

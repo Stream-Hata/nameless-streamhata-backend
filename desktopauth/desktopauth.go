@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
+
+	data_base "github.com/p7x-dev/nameless-streamhata-backend/data-base"
+	"github.com/p7x-dev/nameless-streamhata-backend/twitch"
 )
 
 type Deps interface {
@@ -18,9 +20,10 @@ type Deps interface {
 }
 
 type Service struct {
-	db    *sql.DB
-	mu    sync.Mutex
-	codes map[string]code
+	db       *sql.DB
+	mu       sync.Mutex
+	codes    map[string]code
+	sessions *twitch.Sessions
 }
 
 type code struct {
@@ -28,8 +31,8 @@ type code struct {
 	expires time.Time
 }
 
-func New(db *sql.DB) *Service {
-	return &Service{db: db, codes: make(map[string]code)}
+func New(db *sql.DB, sessions *twitch.Sessions) *Service {
+	return &Service{db: db, sessions: sessions, codes: make(map[string]code)}
 }
 
 func (s *Service) RegisterRoutes(srv Deps) {
@@ -83,13 +86,28 @@ func (s *Service) resume(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	var userID int
-	err := s.db.QueryRowContext(
-		request.Context(),
-		`SELECT u.id FROM tokens t JOIN users u ON u.id = t.user_id
-		  WHERE t.refresh_token = $1 AND u.banned = false LIMIT 1`,
-		token,
-	).Scan(&userID)
+	userID, err := s.sessions.Resume(request.Context(), token)
+	var upgradedToken string
+	if err == sql.ErrNoRows {
+		digest, digestErr := data_base.RefreshTokenDigest(token)
+		if digestErr != nil {
+			http.Error(response, "session temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		err = s.db.QueryRowContext(
+			request.Context(),
+			`SELECT u.id FROM tokens t JOIN users u ON u.id = t.user_id
+			  WHERE t.refresh_token_hash = $1 AND u.banned = false LIMIT 1`,
+			digest,
+		).Scan(&userID)
+		if err == nil {
+			upgradedToken, _, err = s.sessions.Mint(request.Context(), userID)
+		}
+	}
+	if err != nil && err != sql.ErrNoRows {
+		http.Error(response, "session temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(response, "unauthorized", http.StatusUnauthorized)
 
@@ -104,7 +122,11 @@ func (s *Service) resume(response http.ResponseWriter, request *http.Request) {
 	s.codes[bridgeCode] = code{userID: userID, expires: time.Now().Add(2 * time.Minute)}
 	s.mu.Unlock()
 
-	writeJSON(response, http.StatusOK, map[string]string{"bridgeCode": bridgeCode})
+	result := map[string]string{"bridgeCode": bridgeCode}
+	if upgradedToken != "" {
+		result["sessionToken"] = upgradedToken
+	}
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (s *Service) exchange(response http.ResponseWriter, request *http.Request) {
@@ -134,15 +156,9 @@ func (s *Service) exchange(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 
-	var refreshToken string
-	err := s.db.QueryRowContext(
-		request.Context(),
-		`SELECT refresh_token FROM tokens WHERE user_id = $1 ORDER BY id DESC LIMIT 1`,
-		item.userID,
-	).Scan(&refreshToken)
-	if err != nil || refreshToken == "" {
-		http.Error(response, "session not found", http.StatusUnauthorized)
-
+	secret, _, err := s.sessions.Mint(request.Context(), item.userID)
+	if err != nil {
+		http.Error(response, "session creation failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -155,7 +171,8 @@ func (s *Service) exchange(response http.ResponseWriter, request *http.Request) 
 	s.mu.Unlock()
 
 	writeJSON(response, http.StatusOK, map[string]string{
-		"refreshToken": refreshToken,
+		"refreshToken": secret,
+		"sessionToken": secret,
 		"bridgeCode":   bridgeCode,
 	})
 }
@@ -185,51 +202,19 @@ func (s *Service) login(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	var refreshToken string
-
-	err := s.db.QueryRowContext(
-		request.Context(),
-		`SELECT refresh_token FROM tokens WHERE user_id = $1 ORDER BY id DESC LIMIT 1`,
-		item.userID,
-	).Scan(&refreshToken)
-	if err != nil || refreshToken == "" {
-		http.Error(response, "session not found", http.StatusUnauthorized)
-
+	if err := s.sessions.Issue(response, request, item.userID); err != nil {
+		http.Error(response, "session creation failed", http.StatusInternalServerError)
 		return
 	}
-
-	http.SetCookie(response, &http.Cookie{
-		Name:     "e-hub-refresh-token",
-		Value:    refreshToken,
-		Path:     "/",
-		Domain:   os.Getenv("COOKIE_DOMAIN"),
-		HttpOnly: true,
-		Secure:   os.Getenv("IS_PROD") == "1",
-		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(30 * 24 * time.Hour),
-	})
 	http.Redirect(response, request, "/app/dashboard", http.StatusSeeOther)
 }
 
 func (s *Service) userID(request *http.Request) (int, bool) {
-	cookie, err := request.Cookie("e-hub-refresh-token")
-	if err != nil || cookie.Value == "" {
-		return 0, false
-	}
-
-	var userID int
-
-	err = s.db.QueryRowContext(
-		request.Context(),
-		`SELECT u.id FROM tokens t JOIN users u ON u.id = t.user_id
-		  WHERE t.refresh_token = $1 AND u.banned = false LIMIT 1`,
-		cookie.Value,
-	).Scan(&userID)
+	user, _, err := s.sessions.Account(request)
 	if err != nil {
 		return 0, false
 	}
-
-	return userID, true
+	return user.ID, true
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {

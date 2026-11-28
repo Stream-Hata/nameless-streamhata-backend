@@ -16,7 +16,7 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, creator Creator) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) Creator) {
 	srv.ServeEndpoint("/rgg-sync/clips", func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
@@ -24,6 +24,10 @@ func RegisterRoutes(srv Deps, creator Creator) {
 			return
 		}
 
+		creator := resolve(response, request)
+		if creator == nil {
+			return
+		}
 		editURL, err := creator.CreateClip(request.Context())
 		if err != nil {
 			writeJSON(response, http.StatusBadGateway, map[string]string{"error": err.Error()})

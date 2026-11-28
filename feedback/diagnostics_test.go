@@ -88,3 +88,19 @@ func TestCollectDiagnosticsReadsLokiAndPrometheus(t *testing.T) {
 		t.Fatalf("token leaked into diagnostics:\n%s", output)
 	}
 }
+
+func TestChatDiagnosticsAreScopedToAuthenticatedAuthor(t *testing.T) {
+	var gotQuery string
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"result":[]}}`))
+	}))
+	defer loki.Close()
+	service := &Service{http: http.DefaultClient, lokiURL: loki.URL}
+	_ = service.collectDiagnostics(context.Background(), DiagnosticsRequest{
+		Enabled: true, Period: "15m", Sources: []string{"chat"},
+	}, `some"user`)
+	if !strings.Contains(gotQuery, `author_login="some\"user"`) {
+		t.Fatalf("chat query does not safely scope logs to authenticated author: %s", gotQuery)
+	}
+}

@@ -513,8 +513,15 @@ type Deps interface {
 	ServeEndpoint(name string, handler http.HandlerFunc)
 }
 
-func RegisterRoutes(srv Deps, service *Service) {
-	srv.ServeEndpoint("/rgg-sync/moderation", func(response http.ResponseWriter, request *http.Request) {
+func RegisterRoutes(srv Deps, resolve func(http.ResponseWriter, *http.Request) *Service) {
+	serve := func(path string, handler func(*Service, http.ResponseWriter, *http.Request)) {
+		srv.ServeEndpoint(path, func(response http.ResponseWriter, request *http.Request) {
+			if service := resolve(response, request); service != nil {
+				handler(service, response, request)
+			}
+		})
+	}
+	serve("/rgg-sync/moderation", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
 			writeJSON(response, http.StatusOK, map[string]any{
@@ -536,11 +543,11 @@ func RegisterRoutes(srv Deps, service *Service) {
 		}
 	})
 
-	srv.ServeEndpoint("/rgg-sync/moderation/log", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/moderation/log", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusOK, map[string]any{"log": service.Log()})
 	})
 
-	srv.ServeEndpoint("/rgg-sync/moderation/action", func(response http.ResponseWriter, request *http.Request) {
+	serve("/rgg-sync/moderation/action", func(service *Service, response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
 			http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 
